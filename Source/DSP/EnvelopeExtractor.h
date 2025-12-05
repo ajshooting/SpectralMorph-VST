@@ -22,7 +22,7 @@ public:
         // Setup FFT for Cepstrum
         // We use a complex FFT for simplicity with the juce::dsp::FFT class which often expects complex io,
         // though performRealOnlyForwardTransform is available.
-        forwardFFT = std::make_unique<juce::dsp::FFT>(std::log2(fftSize));
+        forwardFFT = std::make_unique<juce::dsp::FFT>((int)std::log2(fftSize));
 
         // Buffers
         timeDomainBuffer.resize((size_t)fftSize * 2);

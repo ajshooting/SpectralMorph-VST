@@ -62,6 +62,11 @@ target_sources(SpectralFormantMorpher
         Source/DSP/FormantWarper.h
 )
 
+target_compile_definitions(SpectralFormantMorpher
+    PUBLIC
+        JUCE_VST3_CAN_REPLACE_VST2=0
+)
+
 target_link_libraries(SpectralFormantMorpher
     PRIVATE
         juce::juce_audio_utils
@@ -110,5 +115,10 @@ target_link_libraries(Runner
         juce::juce_core
         juce::juce_dsp
 )
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(CURL REQUIRED)
+    target_link_libraries(Runner PRIVATE CURL::libcurl)
+endif()
 
 add_test(NAME WarpingLogicTest COMMAND Runner)
