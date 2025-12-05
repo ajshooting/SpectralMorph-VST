@@ -1,0 +1,12 @@
+build/
+.cache/
+.vscode/
+*.o
+*.obj
+*.lib
+*.dll
+*.exe
+*.dylib
+*.so
+juce-build/
+juce-subbuild/
