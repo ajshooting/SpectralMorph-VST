@@ -41,7 +41,7 @@ juce_add_plugin(SpectralFormantMorpher
     COPY_PLUGIN_AFTER_BUILD TRUE
     PLUGIN_MANUFACTURER_CODE AuTe
     PLUGIN_CODE SpFm
-    FORMATS VST3 AU
+    FORMATS VST3 AU Standalone
     PRODUCT_NAME "Spectral Formant Morpher"
 )
 
