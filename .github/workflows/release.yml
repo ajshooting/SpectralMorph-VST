@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Release ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        # Pinned macos-14 to avoid macOS 15 SDK breaking changes (CGWindowListCreateImage obsoleted) with current JUCE version.
+        os: [ubuntu-latest, macos-14, windows-latest]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies (Linux)
+      if: runner.os == 'Linux'
+      # Updated for Ubuntu 24.04 (ubuntu-latest) and JUCE 8
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libasound2-dev libjack-jackd2-dev \
+            ladspa-sdk \
+            libcurl4-openssl-dev  \
+            libfreetype-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev libxrender-dev \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev pkg-config \
+            libglu1-mesa-dev mesa-common-dev zip
+
+    - name: Configure CMake
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build
+      run: cmake --build build --config Release
+
+    # Package Steps
+    - name: Package (Windows)
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        $vst3 = Get-ChildItem -Path build -Recurse -Filter "SpectralFormantMorpher.vst3" | Select-Object -First 1
+        if ($vst3) {
+            Write-Host "Found VST3 at $($vst3.FullName)"
+            Compress-Archive -Path $vst3.FullName -DestinationPath "SpectralFormantMorpher-Windows-VST3.zip"
+        } else {
+            Write-Error "VST3 artifact not found"
+        }
+
+    - name: Package (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        # Find the artifacts
+        VST3_PATH=$(find build -name "SpectralFormantMorpher.vst3" -type d | head -n 1)
+        AU_PATH=$(find build -name "SpectralFormantMorpher.component" -type d | head -n 1)
+
+        if [ -z "$VST3_PATH" ]; then
+            echo "VST3 artifact not found"
+            exit 1
+        fi
+
+        echo "Found VST3 at $VST3_PATH"
+        zip -r SpectralFormantMorpher-macOS-VST3.zip "$VST3_PATH"
+
+        if [ -n "$AU_PATH" ]; then
+            echo "Found AU at $AU_PATH"
+            zip -r SpectralFormantMorpher-macOS-AU.zip "$AU_PATH"
+        else
+            echo "AU artifact not found (might be skipped by CMake if not configured)"
+        fi
+
+    - name: Package (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        VST3_PATH=$(find build -name "SpectralFormantMorpher.vst3" -type d | head -n 1)
+
+        if [ -z "$VST3_PATH" ]; then
+            echo "VST3 artifact not found"
+            exit 1
+        fi
+
+        echo "Found VST3 at $VST3_PATH"
+        zip -r SpectralFormantMorpher-Linux-VST3.zip "$VST3_PATH"
+
+    - name: Upload Release
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: |
+          SpectralFormantMorpher-Windows-VST3.zip
+          SpectralFormantMorpher-macOS-VST3.zip
+          SpectralFormantMorpher-macOS-AU.zip
+          SpectralFormantMorpher-Linux-VST3.zip
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
