@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   release:
     name: Release ${{ matrix.os }}
@@ -57,6 +60,10 @@ jobs:
             }
         }
 
+        if (Test-Path "SpectralFormantMorpher-Windows-VST3.zip") {
+             "RELEASE_ARTIFACTS=SpectralFormantMorpher-Windows-VST3.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+        }
+
     - name: Package (macOS)
       if: runner.os == 'macOS'
       run: |
@@ -79,6 +86,8 @@ jobs:
             echo "AU artifact not found (might be skipped by CMake if not configured)"
         fi
 
+        echo "RELEASE_ARTIFACTS=SpectralFormantMorpher-macOS-*.zip" >> $GITHUB_ENV
+
     - name: Package (Linux)
       if: runner.os == 'Linux'
       run: |
@@ -92,15 +101,13 @@ jobs:
         echo "Found VST3 at $VST3_PATH"
         zip -r SpectralFormantMorpher-Linux-VST3.zip "$VST3_PATH"
 
+        echo "RELEASE_ARTIFACTS=SpectralFormantMorpher-Linux-VST3.zip" >> $GITHUB_ENV
+
     - name: Upload Release
       uses: softprops/action-gh-release@v1
       if: startsWith(github.ref, 'refs/tags/')
       with:
-        files: |
-          SpectralFormantMorpher-Windows-VST3.zip
-          SpectralFormantMorpher-macOS-VST3.zip
-          SpectralFormantMorpher-macOS-AU.zip
-          SpectralFormantMorpher-Linux-VST3.zip
+        files: ${{ env.RELEASE_ARTIFACTS }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -111,7 +118,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Emscripten
-        uses: emscripten-core/setup-emscripten@v0
+        uses: mymindstorm/setup-emsdk@v14
         with:
           version: 3.1.61 # Pinned version known to work with JUCE 8 (or recent enough)
 
