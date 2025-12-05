@@ -1,0 +1,48 @@
+name: Build
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        # Pinned macos-14 to avoid macOS 15 SDK breaking changes (CGWindowListCreateImage obsoleted) with current JUCE version.
+        os: [ubuntu-latest, macos-14, windows-latest]
+
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Install dependencies (Linux)
+      if: runner.os == 'Linux'
+      # Updated for Ubuntu 24.04 (ubuntu-latest) and JUCE 8
+      # Added libgtk-3-dev to satisfy juce_gui_extra requirement (fatal error: gtk/gtk.h)
+      # Added pkg-config explicitely
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libasound2-dev libjack-jackd2-dev \
+            ladspa-sdk \
+            libcurl4-openssl-dev  \
+            libfreetype-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev libxrender-dev \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev pkg-config \
+            libglu1-mesa-dev mesa-common-dev
+
+    - name: Check GTK3 (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        pkg-config --cflags --libs gtk+-3.0
+        pkg-config --list-all | grep webkit
+
+    - name: Configure CMake
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build
+      run: cmake --build build --config Release
+
+    - name: Run Tests
+      run: |
+        cd build
+        ctest -C Release --output-on-failure
