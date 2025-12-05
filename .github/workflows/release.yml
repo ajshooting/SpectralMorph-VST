@@ -47,15 +47,22 @@ jobs:
             Write-Host "Found VST3 at $($vst3.FullName)"
             Compress-Archive -Path $vst3.FullName -DestinationPath "SpectralFormantMorpher-Windows-VST3.zip"
         } else {
-            Write-Error "VST3 artifact not found"
+            # Fallback for space in name
+            $vst3 = Get-ChildItem -Path build -Recurse -Filter "*.vst3" | Select-Object -First 1
+            if ($vst3) {
+                Write-Host "Found VST3 at $($vst3.FullName)"
+                Compress-Archive -Path $vst3.FullName -DestinationPath "SpectralFormantMorpher-Windows-VST3.zip"
+            } else {
+                Write-Error "VST3 artifact not found"
+            }
         }
 
     - name: Package (macOS)
       if: runner.os == 'macOS'
       run: |
         # Find the artifacts
-        VST3_PATH=$(find build -name "SpectralFormantMorpher.vst3" -type d | head -n 1)
-        AU_PATH=$(find build -name "SpectralFormantMorpher.component" -type d | head -n 1)
+        VST3_PATH=$(find build -name "*.vst3" -type d | head -n 1)
+        AU_PATH=$(find build -name "*.component" -type d | head -n 1)
 
         if [ -z "$VST3_PATH" ]; then
             echo "VST3 artifact not found"
@@ -75,7 +82,7 @@ jobs:
     - name: Package (Linux)
       if: runner.os == 'Linux'
       run: |
-        VST3_PATH=$(find build -name "SpectralFormantMorpher.vst3" -type d | head -n 1)
+        VST3_PATH=$(find build -name "*.vst3" -type d | head -n 1)
 
         if [ -z "$VST3_PATH" ]; then
             echo "VST3 artifact not found"
@@ -96,3 +103,50 @@ jobs:
           SpectralFormantMorpher-Linux-VST3.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-web:
+    name: Build Web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Emscripten
+        uses: emscripten-core/setup-emscripten@v0
+        with:
+          version: 3.1.61 # Pinned version known to work with JUCE 8 (or recent enough)
+
+      - name: Configure CMake
+        run: |
+          emcmake cmake -B build-web -DCMAKE_BUILD_TYPE=Release \
+            -DJUCE_BUILD_EXTRAS=ON \
+            -DJUCE_BUILD_EXAMPLES=OFF
+
+      - name: Build
+        run: cmake --build build-web --config Release --parallel
+
+      - name: Package Web
+        run: |
+          # The artifact is likely in build-web/Source/SpectralFormantMorpher_artefacts/Release/Standalone/
+          # It contains .html, .js, .wasm, etc.
+
+          # Find the directory containing the HTML file
+          WEB_DIR=$(find build-web -name "*.html" -exec dirname {} \; | head -n 1)
+
+          if [ -z "$WEB_DIR" ]; then
+            echo "Web artifact not found"
+            exit 1
+          fi
+
+          echo "Found Web artifact at $WEB_DIR"
+          # Navigate to the directory to zip contents cleanly
+          pushd "$WEB_DIR"
+          zip -r "$GITHUB_WORKSPACE/SpectralFormantMorpher-Web.zip" .
+          popd
+
+      - name: Upload Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: SpectralFormantMorpher-Web.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
