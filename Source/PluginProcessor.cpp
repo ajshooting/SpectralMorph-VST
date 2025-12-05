@@ -11,13 +11,13 @@ SpectralFormantMorpherAudioProcessor::SpectralFormantMorpherAudioProcessor()
 #endif
 {
     apvts.addParameterListener("F1_SHIFT", this);
-    apvts.addParameterListener("OVERALL_SCALE", this);
+    apvts.addParameterListener("F2_SHIFT", this);
 }
 
 SpectralFormantMorpherAudioProcessor::~SpectralFormantMorpherAudioProcessor()
 {
     apvts.removeParameterListener("F1_SHIFT", this);
-    apvts.removeParameterListener("OVERALL_SCALE", this);
+    apvts.removeParameterListener("F2_SHIFT", this);
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout SpectralFormantMorpherAudioProcessor::createParameterLayout()
@@ -29,7 +29,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout SpectralFormantMorpherAudioP
         juce::NormalisableRange<float>(0.5f, 2.0f, 0.01f), 1.0f));
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "OVERALL_SCALE", "Warp Scale",
+        "F2_SHIFT", "F2 Shift",
         juce::NormalisableRange<float>(0.5f, 2.0f, 0.01f), 1.0f));
 
     return { params.begin(), params.end() };
@@ -109,9 +109,9 @@ void SpectralFormantMorpherAudioProcessor::prepareToPlay (double sampleRate, int
     spectralProcessor.prepare(spec);
 
     // Initialize params
-    float shift = *apvts.getRawParameterValue("F1_SHIFT"); // Simplified mapping
-    float scale = *apvts.getRawParameterValue("OVERALL_SCALE");
-    spectralProcessor.setShiftFactor(shift * scale); // Mixing logic for now
+    float f1 = *apvts.getRawParameterValue("F1_SHIFT");
+    float f2 = *apvts.getRawParameterValue("F2_SHIFT");
+    spectralProcessor.setParameters(f1, f2);
 }
 
 void SpectralFormantMorpherAudioProcessor::releaseResources()
@@ -160,9 +160,9 @@ void SpectralFormantMorpherAudioProcessor::processBlock (juce::AudioBuffer<float
         buffer.clear (i, 0, buffer.getNumSamples());
 
     // Update parameters
-    float shift = apvts.getRawParameterValue("F1_SHIFT")->load();
-    float scale = apvts.getRawParameterValue("OVERALL_SCALE")->load();
-    spectralProcessor.setShiftFactor(shift * scale); // Logic: Combining them for the simple warper
+    float f1 = apvts.getRawParameterValue("F1_SHIFT")->load();
+    float f2 = apvts.getRawParameterValue("F2_SHIFT")->load();
+    spectralProcessor.setParameters(f1, f2);
 
     juce::dsp::AudioBlock<float> block(buffer);
     juce::dsp::ProcessContextReplacing<float> context(block);
