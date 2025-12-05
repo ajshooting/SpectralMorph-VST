@@ -9,7 +9,7 @@ class SpectrumVisualizer : public juce::Component, public juce::Timer
 public:
     SpectrumVisualizer(SpectralFormantMorpherAudioProcessor& p) : processor(p)
     {
-        startTimerHz(60); // 60fps refresh
+        startTimerHz(60);
     }
 
     ~SpectrumVisualizer() override
@@ -27,23 +27,16 @@ public:
         float width = (float)bounds.getWidth();
         float height = (float)bounds.getHeight();
 
-        // 1. Draw Spectrum
         g.setColour(juce::Colours::darkgrey.withAlpha(0.5f));
         drawPath(g, lastSpectrum, width, height, true);
 
-        // 2. Draw Envelope (Warped)
         g.setColour(juce::Colours::cyan);
         drawPath(g, lastEnvelope, width, height, false);
-
-        // 3. Draw Nodes (F1, F2)
-        // Convert F1, F2 bins to X coordinates
-        // getLatestVisualizationData returns *Target* F1 and F2 in bins.
 
         float binWidth = width / (float)lastEnvelope.size();
 
         // F1 Node
         float f1X = lastF1 * binWidth;
-        // Approximate Y for node (look up envelope magnitude at that bin)
         float f1Mag = 0.0f;
         if ((size_t)lastF1 < lastEnvelope.size()) f1Mag = lastEnvelope[(size_t)lastF1];
         float f1Y = magToY(f1Mag, height);
@@ -65,7 +58,6 @@ public:
         repaint();
     }
 
-    // Mouse Interaction
     void mouseDown(const juce::MouseEvent& e) override
     {
         auto bounds = getLocalBounds();
@@ -76,8 +68,6 @@ public:
         float f2X = lastF2 * binWidth;
 
         float mouseX = (float)e.x;
-
-        // Check distance (simple X distance check for now)
         float sensitivity = 20.0f;
 
         if (std::abs(mouseX - f1X) < sensitivity)
@@ -87,24 +77,16 @@ public:
         else
             draggingNode = 0;
 
-        // If dragging, we capture detected F1/F2 at start of drag to apply relative shift?
-        // Or we just calculate new shift based on where we are dragging vs where it "should" be?
-        // Actually, we are dragging the Target.
-        // The parameter is Shift Factor.
-        // Target = Source * Shift.
-        // Source is not known here perfectly, but we can infer it:
-        // Source = Target / CurrentShift.
-        // NewShift = NewTarget / Source.
-
         if (draggingNode > 0)
         {
             float currentShift = (draggingNode == 1) ?
                 processor.getAPVTS().getRawParameterValue("F1_SHIFT")->load() :
                 processor.getAPVTS().getRawParameterValue("F2_SHIFT")->load();
 
-            float currentTarget = (draggingNode == 1) ? lastF1 : lastF2;
+            float scale = processor.getAPVTS().getRawParameterValue("OVERALL_SCALE")->load();
+            currentShift *= scale;
 
-            // Reconstruct approximate source
+            float currentTarget = (draggingNode == 1) ? lastF1 : lastF2;
             dragSourceBin = currentTarget / std::max(0.01f, currentShift);
         }
     }
@@ -116,25 +98,21 @@ public:
         float width = (float)getWidth();
         float numBins = (float)lastEnvelope.size();
 
-        // Calculate new target bin from Mouse X
         float mouseX = std::max(0.0f, std::min((float)e.x, width));
         float newTargetBin = mouseX / width * numBins;
 
-        // Calculate new shift
-        // NewTarget = Source * NewShift  =>  NewShift = NewTarget / Source
-        float newShift = 1.0f;
+        float newShiftTotal = 1.0f;
         if (dragSourceBin > 0.001f)
-            newShift = newTargetBin / dragSourceBin;
+            newShiftTotal = newTargetBin / dragSourceBin;
 
-        // Clamp to parameter range (0.5 to 2.0)
+        // Decouple Scale. shift = total / scale
+        float scale = processor.getAPVTS().getRawParameterValue("OVERALL_SCALE")->load();
+        float newShift = newShiftTotal / std::max(0.1f, scale);
+
         newShift = std::max(0.5f, std::min(newShift, 2.0f));
 
         if (draggingNode == 1)
         {
-            // Set Parameter
-            // Note: In VST3, we should normalize, but getParameter expects plain value if using setValueNotifyingHost?
-            // APVTS doesn't have direct setValue. We use the Attachment or Parameter.
-
             if (auto* param = processor.getAPVTS().getParameter("F1_SHIFT"))
                 param->setValueNotifyingHost(param->convertTo0to1(newShift));
         }
@@ -163,7 +141,6 @@ private:
     float magToY(float mag, float height)
     {
         float db = juce::Decibels::gainToDecibels(mag);
-        // Range: -100dB to 0dB
         return juce::jmap(db, -100.0f, 0.0f, height, 0.0f);
     }
 
@@ -227,9 +204,11 @@ private:
 
     juce::Slider f1ShiftSlider;
     juce::Slider f2ShiftSlider;
+    juce::Slider scaleSlider;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> f1Attachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> f2Attachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> scaleAttachment;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SpectralFormantMorpherAudioProcessorEditor)
 };

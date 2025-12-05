@@ -12,7 +12,7 @@ include(FetchContent)
 FetchContent_Declare(
     JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-    GIT_TAG        8.0.0 # Pinning a recent version for stability
+    GIT_TAG        8.0.0
 )
 FetchContent_MakeAvailable(JUCE)
 
@@ -21,12 +21,7 @@ FetchContent_MakeAvailable(JUCE)
 # -----------------------------------------------------------------------------
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(PkgConfig REQUIRED)
-
-    # Check for GTK3 (Required for juce_gui_extra)
     pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
-
-    # Check for WebKit2Gtk (Required for juce_gui_extra browser component)
-    # JUCE 8 supports 4.1, falls back to 4.0. We installed 4.1 in CI.
     pkg_check_modules(WEBKIT webkit2gtk-4.1)
     if(NOT WEBKIT_FOUND)
         pkg_check_modules(WEBKIT webkit2gtk-4.0)
@@ -80,13 +75,11 @@ target_link_libraries(SpectralFormantMorpher
         juce::juce_recommended_warning_flags
 )
 
-# Apply Linux explicit flags
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     if(GTK3_FOUND)
         target_include_directories(SpectralFormantMorpher PRIVATE ${GTK3_INCLUDE_DIRS})
         target_link_libraries(SpectralFormantMorpher PRIVATE ${GTK3_LIBRARIES})
     endif()
-
     if(WEBKIT_FOUND)
         target_include_directories(SpectralFormantMorpher PRIVATE ${WEBKIT_INCLUDE_DIRS})
         target_link_libraries(SpectralFormantMorpher PRIVATE ${WEBKIT_LIBRARIES})
@@ -98,7 +91,6 @@ endif()
 # -----------------------------------------------------------------------------
 enable_testing()
 
-# Create a console app for running tests
 juce_add_console_app(Runner
     PRODUCT_NAME "UnitTests"
 )
@@ -106,7 +98,6 @@ juce_add_console_app(Runner
 target_sources(Runner
     PRIVATE
         Tests/WarpingTest.cpp
-        # Include DSP sources to test them directly
         Source/DSP/FormantWarper.h
 )
 

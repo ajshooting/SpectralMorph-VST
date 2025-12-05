@@ -16,7 +16,6 @@ public:
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
    #endif
 
-    using juce::AudioProcessor::processBlock;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
     juce::AudioProcessorEditor* createEditor() override;
@@ -38,7 +37,6 @@ public:
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
-    // Parameter Listener
     void parameterChanged (const juce::String& parameterID, float newValue) override;
 
     juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }

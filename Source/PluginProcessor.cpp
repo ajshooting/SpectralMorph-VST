@@ -12,12 +12,14 @@ SpectralFormantMorpherAudioProcessor::SpectralFormantMorpherAudioProcessor()
 {
     apvts.addParameterListener("F1_SHIFT", this);
     apvts.addParameterListener("F2_SHIFT", this);
+    apvts.addParameterListener("OVERALL_SCALE", this);
 }
 
 SpectralFormantMorpherAudioProcessor::~SpectralFormantMorpherAudioProcessor()
 {
     apvts.removeParameterListener("F1_SHIFT", this);
     apvts.removeParameterListener("F2_SHIFT", this);
+    apvts.removeParameterListener("OVERALL_SCALE", this);
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout SpectralFormantMorpherAudioProcessor::createParameterLayout()
@@ -30,6 +32,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout SpectralFormantMorpherAudioP
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         "F2_SHIFT", "F2 Shift",
+        juce::NormalisableRange<float>(0.5f, 2.0f, 0.01f), 1.0f));
+
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        "OVERALL_SCALE", "Overall Scale",
         juce::NormalisableRange<float>(0.5f, 2.0f, 0.01f), 1.0f));
 
     return { params.begin(), params.end() };
@@ -74,8 +80,7 @@ double SpectralFormantMorpherAudioProcessor::getTailLengthSeconds() const
 
 int SpectralFormantMorpherAudioProcessor::getNumPrograms()
 {
-    return 1;   // NB: some hosts don't cope very well if you tell them there are 0 programs,
-                // so this should be at least 1, even if you're not really implementing programs.
+    return 1;
 }
 
 int SpectralFormantMorpherAudioProcessor::getCurrentProgram()
@@ -108,16 +113,14 @@ void SpectralFormantMorpherAudioProcessor::prepareToPlay (double sampleRate, int
 
     spectralProcessor.prepare(spec);
 
-    // Initialize params
     float f1 = *apvts.getRawParameterValue("F1_SHIFT");
     float f2 = *apvts.getRawParameterValue("F2_SHIFT");
-    spectralProcessor.setParameters(f1, f2);
+    float scale = *apvts.getRawParameterValue("OVERALL_SCALE");
+    spectralProcessor.setParameters(f1, f2, scale);
 }
 
 void SpectralFormantMorpherAudioProcessor::releaseResources()
 {
-    // When playback stops, you can use this as an opportunity to free up any
-    // spare memory, etc.
 }
 
 #ifndef JucePlugin_PreferredChannelConfigurations
@@ -127,15 +130,10 @@ bool SpectralFormantMorpherAudioProcessor::isBusesLayoutSupported (const BusesLa
     juce::ignoreUnused (layouts);
     return true;
   #else
-    // This is the place where you check if the layout is supported.
-    // In this template code we only support mono or stereo.
-    // Some plugin hosts, such as certain GarageBand versions, will only
-    // load plugins that support stereo bus layouts.
     if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono()
      && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
         return false;
 
-    // This checks if the input layout matches the output layout
    #if ! JucePlugin_IsSynth
     if (layouts.getMainOutputChannelSet() != layouts.getMainInputChannelSet())
         return false;
@@ -153,16 +151,13 @@ void SpectralFormantMorpherAudioProcessor::processBlock (juce::AudioBuffer<float
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
 
-    // In case we have more outputs than inputs, this code clears any output
-    // channels that didn't contain input data, (because these aren't
-    // guaranteed to be empty - they may contain garbage).
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    // Update parameters
     float f1 = apvts.getRawParameterValue("F1_SHIFT")->load();
     float f2 = apvts.getRawParameterValue("F2_SHIFT")->load();
-    spectralProcessor.setParameters(f1, f2);
+    float scale = apvts.getRawParameterValue("OVERALL_SCALE")->load();
+    spectralProcessor.setParameters(f1, f2, scale);
 
     juce::dsp::AudioBlock<float> block(buffer);
     juce::dsp::ProcessContextReplacing<float> context(block);
@@ -171,7 +166,7 @@ void SpectralFormantMorpherAudioProcessor::processBlock (juce::AudioBuffer<float
 
 bool SpectralFormantMorpherAudioProcessor::hasEditor() const
 {
-    return true; // (change this to false if you choose to not supply an editor)
+    return true;
 }
 
 juce::AudioProcessorEditor* SpectralFormantMorpherAudioProcessor::createEditor()
@@ -197,10 +192,8 @@ void SpectralFormantMorpherAudioProcessor::setStateInformation (const void* data
 void SpectralFormantMorpherAudioProcessor::parameterChanged (const juce::String& parameterID, float newValue)
 {
     juce::ignoreUnused(parameterID, newValue);
-    // Handled in processBlock for thread safety (using atomic load)
 }
 
-// This creates new instances of the plugin..
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new SpectralFormantMorpherAudioProcessor();

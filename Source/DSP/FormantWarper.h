@@ -3,19 +3,15 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
-
-#if __has_include(<juce_core/juce_core.h>)
- #include <juce_core/juce_core.h>
-#else
- #include <cassert>
- #ifndef jassert
-  #define jassert assert
- #endif
-#endif
+#include <juce_core/juce_core.h>
 
 namespace dsp
 {
 
+/**
+ * Represents a control point for frequency warping.
+ * Maps a Source Frequency Bin to a Destination Frequency Bin.
+ */
 struct WarpingPoint
 {
     float srcBin;
@@ -23,8 +19,14 @@ struct WarpingPoint
 };
 
 /**
- * Handles the frequency warping logic.
- * Generates a mapping from output frequency bin to input frequency bin.
+ * Handles the frequency warping logic using Piecewise Linear Interpolation.
+ *
+ * The goal is to reshape the spectral envelope by mapping output frequency bins
+ * to input frequency bins.
+ *
+ * Example: To shift a formant from 500Hz (src) to 700Hz (dst), we want the
+ * output envelope at 700Hz to take the value from the input envelope at 500Hz.
+ * Thus, the map should be: map[dst] = src.
  */
 class FormantWarper
 {
@@ -32,108 +34,67 @@ public:
     FormantWarper() = default;
 
     /**
-     * Prepares the warp map based on control points.
-     * The points must be sorted by dstBin.
+     * Prepares the warp map based on a list of control points.
      *
-     * The map is generated such that for a given output bin index 'i',
-     * warpMap[i] gives the fractional input bin index to sample from.
-     *
-     * @param numBins The number of frequency bins in the half-spectrum.
-     * @param points A list of control points mapping Source Bin -> Destination Bin.
+     * @param numBins Number of frequency bins in the envelope.
+     * @param points User-defined control points (e.g., F1->NewF1, F2->NewF2).
      */
     void calculateWarpMap(int numBins, std::vector<WarpingPoint> points)
     {
         if (warpMap.size() != (size_t)numBins)
             warpMap.resize((size_t)numBins);
 
-        // Ensure we cover the full range
-        // If the first point isn't 0->0, add it.
+        // Ensure we cover the full range [0, Nyquist]
+        // Anchor 0Hz -> 0Hz
         if (points.empty() || points.front().dstBin > 0.001f)
-        {
             points.insert(points.begin(), {0.0f, 0.0f});
-        }
 
-        // If the last point isn't Nyquist->Nyquist (approx), add it.
-        // Or assume linear extension? Usually better to anchor Nyquist.
+        // Anchor Nyquist -> Nyquist
         if (points.back().dstBin < (float)(numBins - 1))
-        {
             points.push_back({(float)(numBins - 1), (float)(numBins - 1)});
-        }
 
-        // Sort by destination bin just in case
+        // Sort points by Destination bin to allow binary search or linear scan
         std::sort(points.begin(), points.end(), [](const WarpingPoint& a, const WarpingPoint& b) {
             return a.dstBin < b.dstBin;
         });
 
-        // Generate Map
-        // We iterate through output bins 'i'. We find which segment of 'dstBin' 'i' falls into.
-        // Then interpolate the corresponding 'srcBin'.
-
+        // Generate the Map: For every output bin 'i', find the corresponding source bin.
         int currentSegment = 0;
-
         for (int i = 0; i < numBins; ++i)
         {
             float outBin = (float)i;
 
-            // Advance segment if needed
+            // Find the segment [p0, p1] that contains outBin
             while (currentSegment < (int)points.size() - 1 && outBin > points[(size_t)currentSegment + 1].dstBin)
-            {
                 currentSegment++;
-            }
 
             if (currentSegment >= (int)points.size() - 1)
             {
-                // Beyond last point, clamp or extrapolate?
-                // Since we added Nyquist anchor, we should be fine, but let's clamp.
+                // Safety: Clamp to last known source point
                 warpMap[(size_t)i] = points.back().srcBin;
             }
             else
             {
+                // Linear Interpolation
                 const auto& p0 = points[(size_t)currentSegment];
                 const auto& p1 = points[(size_t)currentSegment + 1];
 
                 float range = p1.dstBin - p0.dstBin;
-                float frac = 0.0f;
-                if (range > 0.0001f)
-                    frac = (outBin - p0.dstBin) / range;
+                float frac = (range > 0.0001f) ? (outBin - p0.dstBin) / range : 0.0f;
 
-                // Interpolate Source
                 float srcVal = p0.srcBin + frac * (p1.srcBin - p0.srcBin);
+
+                // Clamp source index to valid range
                 warpMap[(size_t)i] = std::max(0.0f, std::min(srcVal, (float)(numBins - 1)));
             }
         }
     }
 
     /**
-     * Legacy/Simple interface for compatibility during refactor.
-     * Equivalent to a single stretch point at Nyquist/2 or similar,
-     * but actually the previous logic was linear scaling: src = dst * (1/factor).
-     * This corresponds to mapping:
-     *   0 -> 0
-     *   Nyquist -> Nyquist * (1/factor)  (if factor > 1, we map full output to partial input)
+     * Applies the warping to the spectral envelope.
      *
-     *   Wait, if we stretch (factor > 1), we want Output(F) to match Input(F/factor).
-     *   So Output(Nyquist) maps to Input(Nyquist/factor).
-     *   Control Point: Src=Nyquist/Factor -> Dst=Nyquist.
-     */
-    void calculateWarpMapLegacy(int numBins, float shiftFactor)
-    {
-        std::vector<WarpingPoint> points;
-        points.push_back({0.0f, 0.0f});
-
-        float nyquist = (float)(numBins - 1);
-        float srcAtNyquist = nyquist * (1.0f / std::max(0.1f, shiftFactor));
-
-        points.push_back({srcAtNyquist, nyquist});
-
-        calculateWarpMap(numBins, points);
-    }
-
-    /**
-     * Warps the spectral envelope.
-     *
-     * @param srcEnvelope The original spectral envelope (magnitudes).
-     * @param dstEnvelope The destination buffer (must be same size).
+     * @param srcEnvelope The original extracted envelope.
+     * @param dstEnvelope The destination buffer for the warped envelope.
      */
     void process(const std::vector<float>& srcEnvelope, std::vector<float>& dstEnvelope)
     {
@@ -145,17 +106,15 @@ public:
 
         for (size_t i = 0; i < size; ++i)
         {
+            // Get the source index from the map
             float srcIdx = warpMap[i];
 
-            // Linear Interpolation
+            // Linear Interpolation for smooth envelope resampling
             int idx0 = (int)srcIdx;
             int idx1 = std::min(idx0 + 1, (int)maxIdx);
             float frac = srcIdx - idx0;
 
-            float val0 = srcEnvelope[(size_t)idx0];
-            float val1 = srcEnvelope[(size_t)idx1];
-
-            dstEnvelope[i] = val0 + frac * (val1 - val0);
+            dstEnvelope[i] = srcEnvelope[(size_t)idx0] + frac * (srcEnvelope[(size_t)idx1] - srcEnvelope[(size_t)idx0]);
         }
     }
 
