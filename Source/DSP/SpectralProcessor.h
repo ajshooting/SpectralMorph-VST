@@ -19,18 +19,26 @@ public:
     void reset();
 
     // Parameters
-    void setShiftFactor(float factor) { shiftFactor = factor; }
+    void setParameters(float f1Shift, float f2Shift) {
+        f1ShiftFactor = f1Shift;
+        f2ShiftFactor = f2Shift;
+    }
 
     // Visualization Data Access
     // In a real app, use a lock-free FIFO or atomic swap
-    void getLatestVisualizationData(std::vector<float>& spectrum, std::vector<float>& envelope);
+    void getLatestVisualizationData(std::vector<float>& spectrum, std::vector<float>& envelope, float& f1, float& f2);
+
+    float getSampleRate() const { return currentSampleRate; }
 
 private:
     void processBlock(std::vector<float>& data);
+    void detectFormants(const std::vector<float>& envelope, float& f1Bin, float& f2Bin);
 
     static constexpr int fftOrder = 10; // 1024 samples
     static constexpr int fftSize = 1 << fftOrder;
     static constexpr int hopSize = fftSize / 4; // 75% overlap
+
+    double currentSampleRate = 44100.0;
 
     std::unique_ptr<juce::dsp::FFT> fft;
     std::unique_ptr<juce::dsp::WindowingFunction<float>> window;
@@ -50,12 +58,19 @@ private:
     EnvelopeExtractor envelopeExtractor;
     FormantWarper formantWarper;
 
-    float shiftFactor = 1.0f;
+    float f1ShiftFactor = 1.0f;
+    float f2ShiftFactor = 1.0f;
+
+    // Detected formants (in bins)
+    float currentF1 = 0.0f;
+    float currentF2 = 0.0f;
 
     // Visualization
     juce::CriticalSection visualizationLock;
     std::vector<float> visSpectrum;
     std::vector<float> visEnvelope;
+    float visF1 = 0.0f;
+    float visF2 = 0.0f;
 
     int hopCounter = 0;
 };
