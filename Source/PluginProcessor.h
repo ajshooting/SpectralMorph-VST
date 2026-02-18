@@ -1,24 +1,26 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_audio_formats/juce_audio_formats.h>
+#include <array>
 #include "DSP/SpectralProcessor.h"
 
-class SpectralFormantMorpherAudioProcessor  : public juce::AudioProcessor, public juce::AudioProcessorValueTreeState::Listener
+class SpectralFormantMorpherAudioProcessor : public juce::AudioProcessor, public juce::AudioProcessorValueTreeState::Listener
 {
 public:
     SpectralFormantMorpherAudioProcessor();
     ~SpectralFormantMorpherAudioProcessor() override;
 
-    void prepareToPlay (double sampleRate, int samplesPerBlock) override;
+    void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
 
-   #ifndef JucePlugin_PreferredChannelConfigurations
-    bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
-   #endif
+#ifndef JucePlugin_PreferredChannelConfigurations
+    bool isBusesLayoutSupported(const BusesLayout &layouts) const override;
+#endif
 
-    void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    void processBlock(juce::AudioBuffer<float> &, juce::MidiBuffer &) override;
 
-    juce::AudioProcessorEditor* createEditor() override;
+    juce::AudioProcessorEditor *createEditor() override;
     bool hasEditor() const override;
 
     const juce::String getName() const override;
@@ -30,23 +32,27 @@ public:
 
     int getNumPrograms() override;
     int getCurrentProgram() override;
-    void setCurrentProgram (int index) override;
-    const juce::String getProgramName (int index) override;
-    void changeProgramName (int index, const juce::String& newName) override;
+    void setCurrentProgram(int index) override;
+    const juce::String getProgramName(int index) override;
+    void changeProgramName(int index, const juce::String &newName) override;
 
-    void getStateInformation (juce::MemoryBlock& destData) override;
-    void setStateInformation (const void* data, int sizeInBytes) override;
+    void getStateInformation(juce::MemoryBlock &destData) override;
+    void setStateInformation(const void *data, int sizeInBytes) override;
 
-    void parameterChanged (const juce::String& parameterID, float newValue) override;
+    void parameterChanged(const juce::String &parameterID, float newValue) override;
 
-    juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
-    dsp::SpectralProcessor& getSpectralProcessor() { return spectralProcessor; }
+    bool analyzeSourceFileAndApplyFormants(const juce::File &sourceFile, juce::String &message);
+
+    juce::AudioProcessorValueTreeState &getAPVTS() { return apvts; }
+    dsp::SpectralProcessor &getSpectralProcessor() { return spectralProcessor; }
 
 private:
     juce::AudioProcessorValueTreeState apvts;
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+    std::array<float, dsp::SpectralProcessor::numFormants> collectTargetFormantsFromParameters() const;
 
     dsp::SpectralProcessor spectralProcessor;
+    juce::AudioFormatManager formatManager;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SpectralFormantMorpherAudioProcessor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SpectralFormantMorpherAudioProcessor)
 };

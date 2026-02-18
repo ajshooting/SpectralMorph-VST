@@ -2,102 +2,92 @@
 
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_dsp/juce_dsp.h>
+#include <array>
 #include "EnvelopeExtractor.h"
 #include "FormantWarper.h"
 
 namespace dsp
 {
 
-/**
- * Main Spectral Processing Engine.
- *
- * Implements the Source-Filter separation, warping, and reconstruction pipeline:
- * 1. Analysis: STFT with Hann Window and 75% overlap.
- * 2. Envelope Extraction: Cepstral Analysis.
- * 3. Formant Warping: Piecewise linear warping of the envelope.
- * 4. Resynthesis: Flatten spectrum (Source) * Warped Envelope (Filter).
- * 5. Synthesis: Inverse STFT and Overlap-Add.
- */
-class SpectralProcessor
-{
-public:
-    SpectralProcessor();
-    ~SpectralProcessor();
-
-    void prepare(const juce::dsp::ProcessSpec& spec);
-    void process(const juce::dsp::ProcessContextReplacing<float>& context);
-    void reset();
-
     /**
-     * Updates the DSP parameters.
-     * @param f1Shift Multiplier for the first formant frequency.
-     * @param f2Shift Multiplier for the second formant frequency.
-     * @param overallScale Global scaling factor for the frequency axis.
+     * Main Spectral Processing Engine.
+     *
+     * Implements the Source-Filter separation, warping, and reconstruction pipeline:
+     * 1. Analysis: STFT with Hann Window and 75% overlap.
+     * 2. Envelope Extraction: Cepstral Analysis.
+     * 3. Formant Warping: Piecewise linear warping of the envelope.
+     * 4. Resynthesis: Flatten spectrum (Source) * Warped Envelope (Filter).
+     * 5. Synthesis: Inverse STFT and Overlap-Add.
      */
-    void setParameters(float f1Shift, float f2Shift, float overallScale) {
-        f1ShiftFactor = f1Shift;
-        f2ShiftFactor = f2Shift;
-        overallScaleFactor = overallScale;
-    }
+    class SpectralProcessor
+    {
+    public:
+        static constexpr size_t numFormants = 15;
 
-    /**
-     * Retrieves the latest spectral data for the GUI.
-     * Thread-safe using a lock (tryEnter pattern).
-     */
-    void getLatestVisualizationData(std::vector<float>& spectrum, std::vector<float>& envelope, float& f1, float& f2);
+        SpectralProcessor();
+        ~SpectralProcessor();
 
-private:
-    /**
-     * Processes a single FFT frame (frequency domain manipulation).
-     */
-    void processBlock(std::vector<float>& data);
+        void prepare(const juce::dsp::ProcessSpec &spec);
+        void process(const juce::dsp::ProcessContextReplacing<float> &context);
+        void reset();
 
-    /**
-     * Estimates F1 and F2 formants from the envelope using peak detection.
-     */
-    void detectFormants(const std::vector<float>& envelope, float& f1Bin, float& f2Bin);
+        void setTargetFormantsHz(const std::array<float, numFormants> &targetHz);
 
-    static constexpr int fftOrder = 10;          // 1024 samples
-    static constexpr int fftSize = 1 << fftOrder;
-    static constexpr int hopSize = fftSize / 4;  // 75% overlap (standard for STFT)
+        std::array<float, numFormants> estimateFormantsFromBuffer(const juce::AudioBuffer<float> &sourceBuffer, double sourceSampleRate);
 
-    double currentSampleRate = 44100.0;
+        /**
+         * Retrieves the latest spectral data for the GUI.
+         * Thread-safe using a lock (tryEnter pattern).
+         */
+        void getLatestVisualizationData(std::vector<float> &spectrum, std::vector<float> &envelope, float &f1, float &f2);
 
-    // Core DSP Modules
-    std::unique_ptr<juce::dsp::FFT> fft;
-    std::unique_ptr<juce::dsp::WindowingFunction<float>> window;
+    private:
+        /**
+         * Processes a single FFT frame (frequency domain manipulation).
+         */
+        void processBlock(std::vector<float> &data);
 
-    // Buffers
-    std::vector<float> inputFifo;        // Input buffering for STFT
-    std::vector<float> outputAccumulator;// Overlap-Add accumulator
-    std::vector<float> fftBuffer;        // Temp buffer for FFT operations
+        void detectFormants(const std::vector<float> &envelope, double sampleRate, std::array<float, numFormants> &formantBins) const;
 
-    // Spectral Data containers
-    std::vector<float> magnitudeSpectrum;
-    std::vector<float> extractedEnvelope;
-    std::vector<float> warpedEnvelope;
+        static constexpr int fftOrder = 10; // 1024 samples
+        static constexpr int fftSize = 1 << fftOrder;
+        static constexpr int hopSize = fftSize / 4; // 75% overlap (standard for STFT)
 
-    // Helper classes
-    EnvelopeExtractor envelopeExtractor;
-    FormantWarper formantWarper;
+        double currentSampleRate = 44100.0;
 
-    // Parameter State
-    float f1ShiftFactor = 1.0f;
-    float f2ShiftFactor = 1.0f;
-    float overallScaleFactor = 1.0f;
+        // Core DSP Modules
+        std::unique_ptr<juce::dsp::FFT> fft;
+        std::unique_ptr<juce::dsp::WindowingFunction<float>> window;
 
-    // Detected Features
-    float currentF1 = 0.0f;
-    float currentF2 = 0.0f;
+        // Buffers
+        std::vector<float> inputFifo;         // Input buffering for STFT
+        std::vector<float> outputAccumulator; // Overlap-Add accumulator
+        std::vector<float> fftBuffer;         // Temp buffer for FFT operations
 
-    // Visualization (Thread Synchronization)
-    juce::CriticalSection visualizationLock;
-    std::vector<float> visSpectrum;
-    std::vector<float> visEnvelope;
-    float visF1 = 0.0f;
-    float visF2 = 0.0f;
+        // Spectral Data containers
+        std::vector<float> magnitudeSpectrum;
+        std::vector<float> extractedEnvelope;
+        std::vector<float> warpedEnvelope;
 
-    int hopCounter = 0;
-};
+        // Helper classes
+        EnvelopeExtractor envelopeExtractor;
+        FormantWarper formantWarper;
+
+        std::array<float, numFormants> targetFormantsHz{
+            500.0f, 1500.0f, 2500.0f, 3200.0f, 3800.0f,
+            4400.0f, 5000.0f, 5600.0f, 6200.0f, 6800.0f,
+            7400.0f, 8000.0f, 8600.0f, 9200.0f, 9800.0f};
+
+        std::array<float, numFormants> currentFormantBins{};
+
+        // Visualization (Thread Synchronization)
+        juce::CriticalSection visualizationLock;
+        std::vector<float> visSpectrum;
+        std::vector<float> visEnvelope;
+        float visF1 = 0.0f;
+        float visF2 = 0.0f;
+
+        int hopCounter = 0;
+    };
 
 } // namespace dsp

@@ -1,218 +1,286 @@
 #include "SpectralProcessor.h"
 
+#include <algorithm>
+#include <array>
+#include <cmath>
+
 namespace dsp
 {
 
-SpectralProcessor::SpectralProcessor()
-{
-    // Initialize FFT with specified order (size = 2^order)
+  SpectralProcessor::SpectralProcessor()
+  {
     fft = std::make_unique<juce::dsp::FFT>(fftOrder);
-
-    // Hann window for overlap-add
     window = std::make_unique<juce::dsp::WindowingFunction<float>>(fftSize, juce::dsp::WindowingFunction<float>::hann);
 
-    // Resize buffers
     inputFifo.resize(fftSize, 0.0f);
     outputAccumulator.resize(fftSize, 0.0f);
-    fftBuffer.resize(fftSize * 2, 0.0f); // 2x for complex operations
+    fftBuffer.resize(fftSize * 2, 0.0f);
 
-    // Resize spectral containers
-    int numBins = fftSize / 2 + 1;
+    const int numBins = fftSize / 2 + 1;
     magnitudeSpectrum.resize((size_t)numBins);
     extractedEnvelope.resize((size_t)numBins);
     warpedEnvelope.resize((size_t)numBins);
 
-    // Resize visualization buffers
     visSpectrum.resize((size_t)numBins);
     visEnvelope.resize((size_t)numBins);
-}
+  }
 
-SpectralProcessor::~SpectralProcessor() {}
+  SpectralProcessor::~SpectralProcessor() = default;
 
-void SpectralProcessor::prepare(const juce::dsp::ProcessSpec& spec)
-{
+  void SpectralProcessor::prepare(const juce::dsp::ProcessSpec &spec)
+  {
     currentSampleRate = spec.sampleRate;
     envelopeExtractor.prepare(fftSize);
     reset();
-}
+  }
 
-void SpectralProcessor::reset()
-{
+  void SpectralProcessor::reset()
+  {
     std::fill(inputFifo.begin(), inputFifo.end(), 0.0f);
     std::fill(outputAccumulator.begin(), outputAccumulator.end(), 0.0f);
     hopCounter = 0;
-}
+  }
 
-void SpectralProcessor::detectFormants(const std::vector<float>& envelope, float& f1Bin, float& f2Bin)
-{
-    // Detect F1 and F2 using simple peak detection within expected frequency ranges.
-    // F1 Range: 200 - 1000 Hz
-    // F2 Range: 1000 - 3000 Hz
+  void SpectralProcessor::setTargetFormantsHz(const std::array<float, numFormants> &targetHz)
+  {
+    targetFormantsHz = targetHz;
 
-    float hzPerBin = (float)currentSampleRate / fftSize;
-    int minF1Bin = std::max(1, (int)(200.0f / hzPerBin));
-    int maxF1Bin = (int)(1000.0f / hzPerBin);
-    int minF2Bin = (int)(1000.0f / hzPerBin);
-    int maxF2Bin = (int)(3000.0f / hzPerBin);
+    for (size_t i = 0; i < targetFormantsHz.size(); ++i)
+    {
+      const float minHz = (i == 0) ? 200.0f : targetFormantsHz[i - 1] + 20.0f;
+      targetFormantsHz[i] = std::max(minHz, targetFormantsHz[i]);
+    }
+  }
 
-    auto findPeak = [&](int minB, int maxB) {
-        float maxVal = -1.0f;
-        int idx = minB;
-        if (maxB >= (int)envelope.size()) maxB = (int)envelope.size() - 1;
+  void SpectralProcessor::detectFormants(const std::vector<float> &envelope,
+                                         double sampleRate,
+                                         std::array<float, numFormants> &formantBins) const
+  {
+    const float hzPerBin = (float)sampleRate / (float)fftSize;
+    const int minBin = std::max(1, (int)(150.0f / hzPerBin));
+    const int maxBin = std::min((int)envelope.size() - 2, (int)(9000.0f / hzPerBin));
+    const int minDistanceBins = std::max(2, (int)(120.0f / hzPerBin));
 
-        for (int i = minB; i <= maxB; ++i) {
-            if (envelope[(size_t)i] > maxVal) {
-                maxVal = envelope[(size_t)i];
-                idx = i;
-            }
-        }
-        return (float)idx;
+    struct Peak
+    {
+      int bin = 0;
+      float mag = 0.0f;
     };
 
-    f1Bin = findPeak(minF1Bin, maxF1Bin);
-    f2Bin = findPeak(minF2Bin, maxF2Bin);
-}
+    std::vector<Peak> candidates;
+    candidates.reserve((size_t)std::max(0, maxBin - minBin + 1));
 
-void SpectralProcessor::processBlock(std::vector<float>& data)
-{
-    // 1. Windowing
+    for (int i = minBin; i <= maxBin; ++i)
+    {
+      const float v = envelope[(size_t)i];
+      if (v > envelope[(size_t)i - 1] && v >= envelope[(size_t)i + 1])
+        candidates.push_back({i, v});
+    }
+
+    std::sort(candidates.begin(), candidates.end(), [](const Peak &a, const Peak &b)
+              { return a.mag > b.mag; });
+
+    std::vector<int> selected;
+    selected.reserve(numFormants);
+
+    for (const auto &peak : candidates)
+    {
+      bool tooClose = false;
+      for (int chosen : selected)
+      {
+        if (std::abs(chosen - peak.bin) < minDistanceBins)
+        {
+          tooClose = true;
+          break;
+        }
+      }
+
+      if (!tooClose)
+        selected.push_back(peak.bin);
+
+      if (selected.size() >= numFormants)
+        break;
+    }
+
+    std::sort(selected.begin(), selected.end());
+
+    int lastBin = std::max(minBin, 1);
+    for (size_t i = 0; i < numFormants; ++i)
+    {
+      if (i < selected.size())
+      {
+        lastBin = std::max(lastBin + (i == 0 ? 0 : minDistanceBins / 2), selected[i]);
+      }
+      else
+      {
+        lastBin = std::min(maxBin, lastBin + minDistanceBins);
+      }
+
+      formantBins[i] = (float)juce::jlimit(minBin, maxBin, lastBin);
+    }
+  }
+
+  std::array<float, SpectralProcessor::numFormants> SpectralProcessor::estimateFormantsFromBuffer(const juce::AudioBuffer<float> &sourceBuffer,
+                                                                                                  double sourceSampleRate)
+  {
+    std::array<float, numFormants> estimatedHz = targetFormantsHz;
+
+    if (sourceBuffer.getNumSamples() <= 0 || sourceBuffer.getNumChannels() <= 0)
+      return estimatedHz;
+
+    std::vector<float> frame((size_t)fftSize, 0.0f);
+    const int totalSamples = sourceBuffer.getNumSamples();
+    const int start = std::max(0, (totalSamples / 2) - (fftSize / 2));
+    const int copyCount = std::min(fftSize, totalSamples - start);
+
+    const float *readPtr = sourceBuffer.getReadPointer(0);
+    std::copy(readPtr + start, readPtr + start + copyCount, frame.begin());
+
+    window->multiplyWithWindowingTable(frame.data(), fftSize);
+
+    std::fill(fftBuffer.begin(), fftBuffer.end(), 0.0f);
+    std::copy(frame.begin(), frame.end(), fftBuffer.begin());
+
+    fft->performRealOnlyForwardTransform(fftBuffer.data());
+
+    const int numBins = fftSize / 2 + 1;
+    for (int i = 0; i < numBins; ++i)
+    {
+      const float real = fftBuffer[(size_t)i * 2];
+      const float imag = fftBuffer[(size_t)i * 2 + 1];
+      magnitudeSpectrum[(size_t)i] = std::sqrt(real * real + imag * imag);
+    }
+
+    envelopeExtractor.process(magnitudeSpectrum, extractedEnvelope);
+
+    std::array<float, numFormants> bins{};
+    detectFormants(extractedEnvelope, sourceSampleRate, bins);
+
+    const float hzPerBin = (float)sourceSampleRate / (float)fftSize;
+    for (size_t i = 0; i < numFormants; ++i)
+      estimatedHz[i] = bins[i] * hzPerBin;
+
+    return estimatedHz;
+  }
+
+  void SpectralProcessor::processBlock(std::vector<float> &data)
+  {
     window->multiplyWithWindowingTable(data.data(), fftSize);
 
-    // 2. Prepare for FFT
-    // Copy real input to complex buffer (imag parts are 0)
     std::copy(data.begin(), data.end(), fftBuffer.begin());
     std::fill(fftBuffer.begin() + fftSize, fftBuffer.end(), 0.0f);
 
-    // 3. Forward FFT
-    // performRealOnlyForwardTransform transforms the first half of the array in place.
-    // fftBuffer now contains Frequency Domain data (interleaved real/imag).
     fft->performRealOnlyForwardTransform(fftBuffer.data());
 
-    // 4. Compute Magnitude Spectrum
-    int numBins = fftSize / 2 + 1;
+    const int numBins = fftSize / 2 + 1;
     for (int i = 0; i < numBins; ++i)
     {
-        float real = fftBuffer[(size_t)i * 2];
-        float imag = fftBuffer[(size_t)i * 2 + 1];
-        magnitudeSpectrum[(size_t)i] = std::sqrt(real * real + imag * imag);
+      const float real = fftBuffer[(size_t)i * 2];
+      const float imag = fftBuffer[(size_t)i * 2 + 1];
+      magnitudeSpectrum[(size_t)i] = std::sqrt(real * real + imag * imag);
     }
 
-    // 5. Envelope Extraction (Cepstral Analysis)
     envelopeExtractor.process(magnitudeSpectrum, extractedEnvelope);
 
-    // 6. Formant Detection
-    detectFormants(extractedEnvelope, currentF1, currentF2);
+    detectFormants(extractedEnvelope, currentSampleRate, currentFormantBins);
 
-    // 7. Calculate Warping
-    // Map detected formants to target formants based on parameters.
     std::vector<WarpingPoint> points;
-    points.push_back({0.0f, 0.0f}); // Anchor DC
+    points.reserve(numFormants + 2);
+    points.push_back({0.0f, 0.0f});
 
-    float f1Dst = currentF1 * f1ShiftFactor * overallScaleFactor;
-    float f2Dst = currentF2 * f2ShiftFactor * overallScaleFactor;
+    const float hzPerBin = (float)currentSampleRate / (float)fftSize;
+    float lastDst = 0.0f;
+    for (size_t i = 0; i < numFormants; ++i)
+    {
+      const float src = currentFormantBins[i];
+      const float targetBin = targetFormantsHz[i] / std::max(1.0f, hzPerBin);
+      const float dst = juce::jlimit(lastDst + 1.0f, (float)(numBins - 2), targetBin);
+      points.push_back({src, dst});
+      lastDst = dst;
+    }
 
-    // Constraints to prevent crossing or invalid values
-    if (f1Dst < 0.1f) f1Dst = 0.1f;
-    if (f2Dst <= f1Dst) f2Dst = f1Dst + 1.0f;
-
-    points.push_back({currentF1, f1Dst});
-    points.push_back({currentF2, f2Dst});
+    points.push_back({(float)(numBins - 1), (float)(numBins - 1)});
 
     formantWarper.calculateWarpMap(numBins, points);
     formantWarper.process(extractedEnvelope, warpedEnvelope);
 
-    // 8. Update Visualization (Thread-safe attempt)
     if (visualizationLock.tryEnter())
     {
-        visSpectrum = magnitudeSpectrum;
-        visEnvelope = warpedEnvelope;
-        visF1 = f1Dst;
-        visF2 = f2Dst;
-        visualizationLock.exit();
+      visSpectrum = magnitudeSpectrum;
+      visEnvelope = warpedEnvelope;
+      visF1 = points[1].dstBin;
+      visF2 = points[2].dstBin;
+      visualizationLock.exit();
     }
 
-    // 9. Apply Spectral Morphing
-    // We modify the original spectrum by applying the difference between the warped envelope and the original envelope.
-    // NewMagnitude = OriginalMagnitude * (WarpedEnvelope / OriginalEnvelope)
-    // This preserves the fine structure (harmonics/pitch) but imposes the new formant structure.
     for (int i = 0; i < numBins; ++i)
     {
-        float originalEnv = std::max(extractedEnvelope[(size_t)i], 1e-9f);
-        float scale = warpedEnvelope[(size_t)i] / originalEnv;
+      const float originalEnv = std::max(extractedEnvelope[(size_t)i], 1e-9f);
+      const float scale = warpedEnvelope[(size_t)i] / originalEnv;
 
-        // Scale both Real and Imaginary parts to preserve Phase
-        fftBuffer[(size_t)i * 2] *= scale;
-        fftBuffer[(size_t)i * 2 + 1] *= scale;
+      fftBuffer[(size_t)i * 2] *= scale;
+      fftBuffer[(size_t)i * 2 + 1] *= scale;
     }
 
-    // 10. Inverse FFT
     fft->performRealOnlyInverseTransform(fftBuffer.data());
-
-    // 11. Windowing (Synthesis)
-    // We window again for OLA (Overlap-Add) consistency
     window->multiplyWithWindowingTable(fftBuffer.data(), fftSize);
 
-    // Copy back to data vector
-    for(int i=0; i<fftSize; ++i) data[(size_t)i] = fftBuffer[(size_t)i];
-}
+    for (int i = 0; i < fftSize; ++i)
+      data[(size_t)i] = fftBuffer[(size_t)i];
+  }
 
-void SpectralProcessor::process(const juce::dsp::ProcessContextReplacing<float>& context)
-{
-    const auto& inputBlock = context.getInputBlock();
-    auto& outputBlock = context.getOutputBlock();
-    size_t numSamples = inputBlock.getNumSamples();
-    size_t numChannels = inputBlock.getNumChannels();
+  void SpectralProcessor::process(const juce::dsp::ProcessContextReplacing<float> &context)
+  {
+    const auto &inputBlock = context.getInputBlock();
+    auto &outputBlock = context.getOutputBlock();
+    const size_t numSamples = inputBlock.getNumSamples();
+    const size_t numChannels = inputBlock.getNumChannels();
 
-    // Mono processing on Channel 0 (Simple demo logic, copies result to other channels)
-    auto* src = inputBlock.getChannelPointer(0);
-    auto* dst = outputBlock.getChannelPointer(0);
+    auto *src = inputBlock.getChannelPointer(0);
+    auto *dst = outputBlock.getChannelPointer(0);
 
     for (size_t i = 0; i < numSamples; ++i)
     {
-        // Add new sample to FIFO
-        std::rotate(inputFifo.begin(), inputFifo.begin() + 1, inputFifo.end());
-        inputFifo.back() = src[i];
+      std::rotate(inputFifo.begin(), inputFifo.begin() + 1, inputFifo.end());
+      inputFifo.back() = src[i];
 
-        // Output accumulated sample
-        float outSample = outputAccumulator[0];
+      const float outSample = outputAccumulator[0];
 
-        // Shift Accumulator
-        std::rotate(outputAccumulator.begin(), outputAccumulator.begin() + 1, outputAccumulator.end());
-        outputAccumulator.back() = 0.0f;
+      std::rotate(outputAccumulator.begin(), outputAccumulator.begin() + 1, outputAccumulator.end());
+      outputAccumulator.back() = 0.0f;
 
-        dst[i] = outSample;
+      dst[i] = outSample;
 
-        // Check if hop size reached
-        hopCounter++;
-        if (hopCounter >= hopSize)
-        {
-            hopCounter = 0;
+      ++hopCounter;
+      if (hopCounter >= hopSize)
+      {
+        hopCounter = 0;
 
-            // Process current frame
-            std::vector<float> frame = inputFifo;
-            processBlock(frame);
+        std::vector<float> frame = inputFifo;
+        processBlock(frame);
 
-            // Overlap-Add result into Accumulator
-            for (int k = 0; k < fftSize; ++k)
-                outputAccumulator[(size_t)k] += frame[(size_t)k];
-        }
+        for (int k = 0; k < fftSize; ++k)
+          outputAccumulator[(size_t)k] += frame[(size_t)k];
+      }
     }
 
-    // Copy to other channels (Stereo support)
     for (size_t ch = 1; ch < numChannels; ++ch)
     {
-        auto* chDst = outputBlock.getChannelPointer(ch);
-        std::copy(dst, dst + numSamples, chDst);
+      auto *chDst = outputBlock.getChannelPointer(ch);
+      std::copy(dst, dst + numSamples, chDst);
     }
-}
+  }
 
-void SpectralProcessor::getLatestVisualizationData(std::vector<float>& spectrum, std::vector<float>& envelope, float& f1, float& f2)
-{
+  void SpectralProcessor::getLatestVisualizationData(std::vector<float> &spectrum,
+                                                     std::vector<float> &envelope,
+                                                     float &f1,
+                                                     float &f2)
+  {
     const juce::ScopedLock lock(visualizationLock);
     spectrum = visSpectrum;
     envelope = visEnvelope;
     f1 = visF1;
     f2 = visF2;
-}
+  }
 
 } // namespace dsp

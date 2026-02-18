@@ -1,43 +1,44 @@
 # SpectralFormantMorpher
 
-A real-time VST3/AU audio plugin that allows for independent manipulation of vocal formants (F1, F2) without altering the pitch. This enables gender-bending effects, vocal tract resizing, and unique timbral transformations using Source-Filter theory.
+A real-time VST3/AU audio plugin for vocal timbre morphing with direct control of `F1〜F15` formants while preserving pitch.
 
 ## Features
 
-*   **Source-Filter Separation:** Uses Cepstral Analysis to separate the spectral envelope (vocal tract) from the excitation (harmonics).
-*   **Formant Warping:** Interactive dragging of F1 and F2 nodes to reshape the spectral envelope.
-*   **Real-time Visualization:** High-performance (60fps) spectrum analyzer with overlaid envelope and control nodes.
-*   **Parameters:**
-    *   `F1 Shift`: Multiplier for the first formant frequency.
-    *   `F2 Shift`: Multiplier for the second formant frequency.
-    *   `Overall Scale`: Global frequency scaling factor (simulates Vocal Tract Length).
+- **F1/F2 XY Pad:** Move one point in XY space to control `F1` (Y axis) and `F2` (X axis) in Hz.
+- **F3〜F15 Mixer-style Sliders:** Each higher formant can be controlled independently with vertical sliders.
+- **Source Audio Import:** Load a source file (`wav/aiff/flac/mp3`) and auto-estimate/apply `F1〜F15` as the target template.
+- **Real-time Morphing:** During playback, the current input envelope is warped toward the configured `F1〜F15` targets.
+- **Real-time Visualization:** Spectrum + warped envelope preview while processing.
 
 ## Technical Details
 
 The plugin is built with **JUCE 8** and **C++20**.
 
 ### DSP Pipeline
+
 1.  **STFT Analysis:** The input signal is windowed (Hann) and transformed using FFT (1024 samples, 75% overlap).
 2.  **Envelope Extraction:**
-    *   Log Magnitude Spectrum -> Inverse FFT -> Cepstrum.
-    *   Liftering (low-pass) to extract the smooth envelope.
-    *   Forward FFT -> Exponentiation to get the Linear Envelope.
-3.  **Warping:** A Piecewise Linear Warping map is generated based on the target F1/F2 shifts. This map interpolates the envelope indices.
-4.  **Resynthesis:** The original "Excitation" (flattened spectrum) is multiplied by the new "Warped Envelope".
-5.  **Reconstruction:** Inverse FFT and Overlap-Add method to reconstruct the time-domain signal.
+    - Log Magnitude Spectrum -> Inverse FFT -> Cepstrum.
+    - Liftering (low-pass) to extract the smooth envelope.
+    - Forward FFT -> Exponentiation to get the Linear Envelope.
+3.  **Formant Detection:** Detect up to 15 envelope peaks as the current input formants.
+4.  **Warping:** Build a piecewise-linear mapping from detected formants to target `F1〜F15` bins.
+5.  **Resynthesis:** Apply warped envelope to the source spectral fine structure.
+6.  **Reconstruction:** Inverse FFT and overlap-add synthesis.
 
 ## Build Instructions
 
 ### Prerequisites
-*   **CMake** (3.20+)
-*   **C++ Compiler** supporting C++20 (GCC 10+, Clang 10+, MSVC 2019+)
-*   **Linux Dependencies** (Ubuntu/Debian):
-    ```bash
-    sudo apt-get install libasound2-dev libjack-jackd2-dev ladspa-sdk \
-        libcurl4-openssl-dev libfreetype-dev libx11-dev libxcomposite-dev \
-        libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev libxrender-dev \
-        libwebkit2gtk-4.1-dev libgtk-3-dev
-    ```
+
+- **CMake** (3.20+)
+- **C++ Compiler** supporting C++20 (GCC 10+, Clang 10+, MSVC 2019+)
+- **Linux Dependencies** (Ubuntu/Debian):
+  ```bash
+  sudo apt-get install libasound2-dev libjack-jackd2-dev ladspa-sdk \
+      libcurl4-openssl-dev libfreetype-dev libx11-dev libxcomposite-dev \
+      libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev libxrender-dev \
+      libwebkit2gtk-4.1-dev libgtk-3-dev
+  ```
 
 ### Compilation
 
