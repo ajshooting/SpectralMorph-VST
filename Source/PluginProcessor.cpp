@@ -28,12 +28,18 @@ SpectralFormantMorpherAudioProcessor::SpectralFormantMorpherAudioProcessor()
 
   for (size_t i = 0; i < dsp::SpectralProcessor::numFormants; ++i)
     apvts.addParameterListener(formantParamId(i), this);
+
+  apvts.addParameterListener("MIX", this);
+  apvts.addParameterListener("OUTPUT_GAIN", this);
 }
 
 SpectralFormantMorpherAudioProcessor::~SpectralFormantMorpherAudioProcessor()
 {
   for (size_t i = 0; i < dsp::SpectralProcessor::numFormants; ++i)
     apvts.removeParameterListener(formantParamId(i), this);
+
+  apvts.removeParameterListener("MIX", this);
+  apvts.removeParameterListener("OUTPUT_GAIN", this);
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout SpectralFormantMorpherAudioProcessor::createParameterLayout()
@@ -62,6 +68,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout SpectralFormantMorpherAudioP
         juce::NormalisableRange<float>(minHz, maxHz, 1.0f),
         defaultFormantsHz[i]));
   }
+
+  // Dry/Wet Mix (0% = fully dry, 100% = fully wet)
+  params.push_back(std::make_unique<juce::AudioParameterFloat>(
+      "MIX", "Mix",
+      juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f),
+      100.0f));
+
+  // Output Gain (dB)
+  params.push_back(std::make_unique<juce::AudioParameterFloat>(
+      "OUTPUT_GAIN", "Output Gain",
+      juce::NormalisableRange<float>(-24.0f, 6.0f, 0.1f),
+      0.0f));
 
   return {params.begin(), params.end()};
 }
@@ -193,6 +211,8 @@ void SpectralFormantMorpherAudioProcessor::prepareToPlay(double sampleRate, int 
 
   spectralProcessor.prepare(spec);
   spectralProcessor.setTargetFormantsHz(collectTargetFormantsFromParameters());
+
+  dryBuffer.setSize(getTotalNumOutputChannels(), samplesPerBlock);
 }
 
 void SpectralFormantMorpherAudioProcessor::releaseResources()
@@ -232,9 +252,39 @@ void SpectralFormantMorpherAudioProcessor::processBlock(juce::AudioBuffer<float>
 
   spectralProcessor.setTargetFormantsHz(collectTargetFormantsFromParameters());
 
+  // Save dry signal for mix
+  const float mix = apvts.getRawParameterValue("MIX")->load() / 100.0f;
+  const float outputGainDb = apvts.getRawParameterValue("OUTPUT_GAIN")->load();
+  const float outputGain = juce::Decibels::decibelsToGain(outputGainDb);
+
+  dryBuffer.makeCopyOf(buffer, true);
+
+  // Process wet signal
   juce::dsp::AudioBlock<float> block(buffer);
   juce::dsp::ProcessContextReplacing<float> context(block);
   spectralProcessor.process(context);
+
+  // Apply dry/wet mix and output gain
+  const int numSamples = buffer.getNumSamples();
+  for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+  {
+    auto *wet = buffer.getWritePointer(ch);
+    const auto *dry = dryBuffer.getReadPointer(ch);
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+      // Mix: 0 = dry, 1 = wet
+      float sample = dry[i] * (1.0f - mix) + wet[i] * mix;
+
+      // Apply output gain
+      sample *= outputGain;
+
+      // Safety soft clip to prevent extreme values
+      sample = std::tanh(sample);
+
+      wet[i] = sample;
+    }
+  }
 }
 
 bool SpectralFormantMorpherAudioProcessor::hasEditor() const

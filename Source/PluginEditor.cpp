@@ -86,6 +86,28 @@ SpectralFormantMorpherAudioProcessorEditor::SpectralFormantMorpherAudioProcessor
         audioProcessor.getAPVTS(), formantParamId(i + 2), slider));
   }
 
+  // Mix slider
+  mixSlider.setSliderStyle(juce::Slider::Rotary);
+  mixSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 60, 16);
+  mixSlider.setTextValueSuffix(" %");
+  addAndMakeVisible(mixSlider);
+  mixLabel.setText("Mix", juce::dontSendNotification);
+  mixLabel.setJustificationType(juce::Justification::centred);
+  addAndMakeVisible(mixLabel);
+  mixAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+      audioProcessor.getAPVTS(), "MIX", mixSlider);
+
+  // Output Gain slider
+  gainSlider.setSliderStyle(juce::Slider::Rotary);
+  gainSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 60, 16);
+  gainSlider.setTextValueSuffix(" dB");
+  addAndMakeVisible(gainSlider);
+  gainLabel.setText("Gain", juce::dontSendNotification);
+  gainLabel.setJustificationType(juce::Justification::centred);
+  addAndMakeVisible(gainLabel);
+  gainAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+      audioProcessor.getAPVTS(), "OUTPUT_GAIN", gainSlider);
+
   loadSourceButton.addListener(this);
   addAndMakeVisible(loadSourceButton);
 
@@ -93,7 +115,7 @@ SpectralFormantMorpherAudioProcessorEditor::SpectralFormantMorpherAudioProcessor
   statusLabel.setJustificationType(juce::Justification::centredLeft);
   addAndMakeVisible(statusLabel);
 
-  setSize(1080, 620);
+  setSize(1080, 680);
 }
 
 SpectralFormantMorpherAudioProcessorEditor::~SpectralFormantMorpherAudioProcessorEditor()
@@ -115,10 +137,25 @@ void SpectralFormantMorpherAudioProcessorEditor::resized()
   statusLabel.setBounds(top.reduced(8, 0));
 
   auto mid = area.removeFromTop(320);
+
+  // Left column: XY pad + Mix/Gain knobs
   auto left = mid.removeFromLeft(300);
-  xyPad.setBounds(left.removeFromTop(180));
+  xyPad.setBounds(left.removeFromTop(200));
+
+  auto knobArea = left.removeFromTop(110);
+  auto mixArea = knobArea.removeFromLeft(knobArea.getWidth() / 2);
+  auto gainArea = knobArea;
+
+  mixLabel.setBounds(mixArea.removeFromTop(18));
+  mixSlider.setBounds(mixArea.reduced(8));
+
+  gainLabel.setBounds(gainArea.removeFromTop(18));
+  gainSlider.setBounds(gainArea.reduced(8));
+
+  // Right: spectrum visualizer
   visualizer.setBounds(mid);
 
+  // Bottom: F3~F15 sliders
   auto sliderArea = area.reduced(4);
   const int colWidth = sliderArea.getWidth() / (int)formantSliders.size();
 

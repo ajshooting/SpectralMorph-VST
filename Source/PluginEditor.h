@@ -149,6 +149,15 @@ private:
   juce::Label statusLabel;
   std::unique_ptr<juce::FileChooser> sourceFileChooser;
 
+  // Mix & Output Gain controls
+  juce::Slider mixSlider;
+  juce::Label mixLabel;
+  std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mixAttachment;
+
+  juce::Slider gainSlider;
+  juce::Label gainLabel;
+  std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> gainAttachment;
+
   void buttonClicked(juce::Button *button) override;
 
   JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SpectralFormantMorpherAudioProcessorEditor)

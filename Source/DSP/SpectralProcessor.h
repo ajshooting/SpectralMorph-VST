@@ -87,7 +87,17 @@ namespace dsp
         float visF1 = 0.0f;
         float visF2 = 0.0f;
 
+        // STFT state
         int hopCounter = 0;
+        int inputWritePos = 0;
+        int outputReadPos = 0;
+
+        // Normalization: JUCE IFFT multiplies by N, and Hann^2 overlap-add with 75% overlap = 1.5
+        // Total gain = N * 1.5, so we normalize by 1 / (N * 1.5) = 2 / (3N)
+        static constexpr float overlapAddSum = 1.5f;
+
+        // Maximum gain ratio allowed for envelope warping (prevents extreme amplification)
+        static constexpr float maxEnvelopeGainDb = 30.0f; // ~31.6x linear
     };
 
 } // namespace dsp

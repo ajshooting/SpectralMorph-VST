@@ -54,5 +54,8 @@ private:
     dsp::SpectralProcessor spectralProcessor;
     juce::AudioFormatManager formatManager;
 
+    // Dry buffer for dry/wet mixing
+    juce::AudioBuffer<float> dryBuffer;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SpectralFormantMorpherAudioProcessor)
 };

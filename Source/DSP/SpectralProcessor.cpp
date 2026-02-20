@@ -39,6 +39,8 @@ namespace dsp
     std::fill(inputFifo.begin(), inputFifo.end(), 0.0f);
     std::fill(outputAccumulator.begin(), outputAccumulator.end(), 0.0f);
     hopCounter = 0;
+    inputWritePos = 0;
+    outputReadPos = 0;
   }
 
   void SpectralProcessor::setTargetFormantsHz(const std::array<float, numFormants> &targetHz)
@@ -165,6 +167,7 @@ namespace dsp
 
   void SpectralProcessor::processBlock(std::vector<float> &data)
   {
+    // --- Analysis ---
     window->multiplyWithWindowingTable(data.data(), fftSize);
 
     std::copy(data.begin(), data.end(), fftBuffer.begin());
@@ -180,8 +183,10 @@ namespace dsp
       magnitudeSpectrum[(size_t)i] = std::sqrt(real * real + imag * imag);
     }
 
+    // --- Envelope Extraction (Cepstral) ---
     envelopeExtractor.process(magnitudeSpectrum, extractedEnvelope);
 
+    // --- Formant Detection & Warping ---
     detectFormants(extractedEnvelope, currentSampleRate, currentFormantBins);
 
     std::vector<WarpingPoint> points;
@@ -204,6 +209,7 @@ namespace dsp
     formantWarper.calculateWarpMap(numBins, points);
     formantWarper.process(extractedEnvelope, warpedEnvelope);
 
+    // --- Visualization data (lock-free tryEnter) ---
     if (visualizationLock.tryEnter())
     {
       visSpectrum = magnitudeSpectrum;
@@ -213,16 +219,28 @@ namespace dsp
       visualizationLock.exit();
     }
 
+    // --- Apply warped envelope (Source-Filter resynthesis) ---
+    // Scale = warpedEnv / originalEnv, clamped to prevent extreme amplification.
+    const float maxGainLinear = std::pow(10.0f, maxEnvelopeGainDb / 20.0f);
     for (int i = 0; i < numBins; ++i)
     {
-      const float originalEnv = std::max(extractedEnvelope[(size_t)i], 1e-9f);
-      const float scale = warpedEnvelope[(size_t)i] / originalEnv;
+      const float originalEnv = std::max(extractedEnvelope[(size_t)i], 1e-7f);
+      const float warpedVal = std::max(warpedEnvelope[(size_t)i], 1e-9f);
+      const float scale = juce::jlimit(0.0f, maxGainLinear, warpedVal / originalEnv);
 
       fftBuffer[(size_t)i * 2] *= scale;
       fftBuffer[(size_t)i * 2 + 1] *= scale;
     }
 
+    // --- Synthesis (IFFT + window) ---
     fft->performRealOnlyInverseTransform(fftBuffer.data());
+
+    // Normalize: JUCE IFFT does not divide by N.
+    // Combined with overlap-add of Hann^2 (= 1.5), total normalization = 1/(N * 1.5)
+    const float normFactor = 1.0f / ((float)fftSize * overlapAddSum);
+    for (int i = 0; i < fftSize; ++i)
+      fftBuffer[(size_t)i] *= normFactor;
+
     window->multiplyWithWindowingTable(fftBuffer.data(), fftSize);
 
     for (int i = 0; i < fftSize; ++i)
@@ -241,29 +259,37 @@ namespace dsp
 
     for (size_t i = 0; i < numSamples; ++i)
     {
-      std::rotate(inputFifo.begin(), inputFifo.begin() + 1, inputFifo.end());
-      inputFifo.back() = src[i];
+      // Write new input sample into circular buffer
+      inputFifo[(size_t)inputWritePos] = src[i];
+      inputWritePos = (inputWritePos + 1) % fftSize;
 
-      const float outSample = outputAccumulator[0];
-
-      std::rotate(outputAccumulator.begin(), outputAccumulator.begin() + 1, outputAccumulator.end());
-      outputAccumulator.back() = 0.0f;
-
-      dst[i] = outSample;
+      // Read output sample from circular accumulator
+      dst[i] = outputAccumulator[(size_t)outputReadPos];
+      outputAccumulator[(size_t)outputReadPos] = 0.0f;
+      outputReadPos = (outputReadPos + 1) % fftSize;
 
       ++hopCounter;
       if (hopCounter >= hopSize)
       {
         hopCounter = 0;
 
-        std::vector<float> frame = inputFifo;
+        // Assemble frame from circular input buffer (oldest to newest)
+        std::vector<float> frame((size_t)fftSize);
+        for (int k = 0; k < fftSize; ++k)
+          frame[(size_t)k] = inputFifo[(size_t)((inputWritePos + k) % fftSize)];
+
         processBlock(frame);
 
+        // Overlap-add into circular output accumulator
         for (int k = 0; k < fftSize; ++k)
-          outputAccumulator[(size_t)k] += frame[(size_t)k];
+        {
+          const int pos = (outputReadPos + k) % fftSize;
+          outputAccumulator[(size_t)pos] += frame[(size_t)k];
+        }
       }
     }
 
+    // Copy channel 0 result to all other channels
     for (size_t ch = 1; ch < numChannels; ++ch)
     {
       auto *chDst = outputBlock.getChannelPointer(ch);
