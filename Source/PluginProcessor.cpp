@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 
@@ -141,7 +142,7 @@ bool SpectralFormantMorpherAudioProcessor::analyzeSourceFileAndApplyFormants(con
     return false;
   }
 
-  const juce::int64 maxReadSamples = juce::jmin<juce::int64>((juce::int64)(reader->sampleRate * 6.0), reader->lengthInSamples);
+  const juce::int64 maxReadSamples = std::min<juce::int64>((juce::int64)(reader->sampleRate * 6.0), reader->lengthInSamples);
   if (maxReadSamples <= 0)
   {
     message = "参照音源に有効なサンプルがありません。";
