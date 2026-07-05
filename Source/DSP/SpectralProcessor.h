@@ -45,13 +45,25 @@ namespace dsp
         /**
          * Processes a single FFT frame (frequency domain manipulation).
          */
-        void processBlock(std::vector<float> &data);
+        void processFrame(std::vector<float> &data, bool updateVisualization);
 
         void detectFormants(const std::vector<float> &envelope, double sampleRate, std::array<float, numFormants> &formantBins) const;
 
         static constexpr int fftOrder = 10; // 1024 samples
         static constexpr int fftSize = 1 << fftOrder;
         static constexpr int hopSize = fftSize / 4; // 75% overlap (standard for STFT)
+
+        struct ChannelState
+        {
+            std::vector<float> inputFifo;
+            std::vector<float> outputAccumulator;
+            std::vector<float> frame;
+            int hopCounter = 0;
+            int inputWritePos = 0;
+            int outputReadPos = 0;
+        };
+
+        void initialiseChannelState(ChannelState &state) const;
 
         double currentSampleRate = 44100.0;
 
@@ -60,9 +72,8 @@ namespace dsp
         std::unique_ptr<juce::dsp::WindowingFunction<float>> window;
 
         // Buffers
-        std::vector<float> inputFifo;         // Input buffering for STFT
-        std::vector<float> outputAccumulator; // Overlap-Add accumulator
         std::vector<float> fftBuffer;         // Temp buffer for FFT operations
+        std::vector<ChannelState> channelStates;
 
         // Spectral Data containers
         std::vector<float> magnitudeSpectrum;
@@ -72,6 +83,7 @@ namespace dsp
         // Helper classes
         EnvelopeExtractor envelopeExtractor;
         FormantWarper formantWarper;
+        std::vector<WarpingPoint> warpPoints;
 
         std::array<float, numFormants> targetFormantsHz{
             500.0f, 1500.0f, 2500.0f, 3200.0f, 3800.0f,
@@ -86,11 +98,6 @@ namespace dsp
         std::vector<float> visEnvelope;
         float visF1 = 0.0f;
         float visF2 = 0.0f;
-
-        // STFT state
-        int hopCounter = 0;
-        int inputWritePos = 0;
-        int outputReadPos = 0;
 
         // Normalization: JUCE IFFT multiplies by N, and Hann^2 overlap-add with 75% overlap = 1.5
         // Total gain = N * 1.5, so we normalize by 1 / (N * 1.5) = 2 / (3N)

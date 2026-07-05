@@ -2,6 +2,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <algorithm>
 #include <array>
 #include <vector>
 
@@ -23,25 +24,38 @@ public:
 
   void paint(juce::Graphics &g) override
   {
-    g.fillAll(juce::Colours::black);
+    g.fillAll(juce::Colour(0xff101214));
+
+    auto bounds = getLocalBounds().toFloat();
+    g.setColour(juce::Colour(0xff2a2f33));
+    g.drawRoundedRectangle(bounds.reduced(0.5f), 6.0f, 1.0f);
 
     if (lastSpectrum.empty() || lastEnvelope.empty())
       return;
 
-    const auto bounds = getLocalBounds();
-    const float width = (float)bounds.getWidth();
-    const float height = (float)bounds.getHeight();
+    const float width = bounds.getWidth();
+    const float height = bounds.getHeight();
 
-    g.setColour(juce::Colours::darkgrey.withAlpha(0.5f));
+    g.setColour(juce::Colour(0xff22272b));
+    for (int i = 1; i < 4; ++i)
+    {
+      const float y = height * (float)i / 4.0f;
+      g.drawHorizontalLine((int)y, 0.0f, width);
+    }
+
+    g.setColour(juce::Colour(0xff384149));
     drawPath(g, lastSpectrum, width, height, true);
 
-    g.setColour(juce::Colours::cyan);
+    g.setColour(juce::Colour(0xff61d6d6));
     drawPath(g, lastEnvelope, width, height, false);
 
     const float binWidth = width / (float)lastEnvelope.size();
 
-    drawNode(g, lastF1 * binWidth, "F1", height);
-    drawNode(g, lastF2 * binWidth, "F2", height);
+    if (lastF1 > 0.0f)
+      drawNode(g, lastF1 * binWidth, "F1", height);
+
+    if (lastF2 > 0.0f)
+      drawNode(g, lastF2 * binWidth, "F2", height);
   }
 
   void timerCallback() override
@@ -59,7 +73,7 @@ private:
 
   static float magToY(float mag, float height)
   {
-    const float db = juce::Decibels::gainToDecibels(mag);
+    const float db = juce::jlimit(-100.0f, 0.0f, juce::Decibels::gainToDecibels(std::max(mag, 1.0e-9f)));
     return juce::jmap(db, -100.0f, 0.0f, height, 0.0f);
   }
 
@@ -69,12 +83,16 @@ private:
       return;
 
     juce::Path path;
-    path.startNewSubPath(0, height);
 
     const int numBins = (int)data.size();
+    const float firstY = magToY(data.front(), height);
+    path.startNewSubPath(0.0f, fill ? height : firstY);
+    if (fill)
+      path.lineTo(0.0f, firstY);
+
     for (int i = 0; i < numBins; ++i)
     {
-      const float x = (float)i / (float)numBins * width;
+      const float x = (numBins > 1) ? (float)i / (float)(numBins - 1) * width : 0.0f;
       const float y = magToY(data[(size_t)i], height);
       path.lineTo(x, y);
     }
@@ -97,31 +115,43 @@ private:
     const float radius = 7.0f;
     const juce::Rectangle<float> area(x - radius, y - radius, radius * 2.0f, radius * 2.0f);
 
-    g.setColour(juce::Colours::yellow);
+    g.setColour(juce::Colour(0xfff4c95d));
     g.fillEllipse(area);
-    g.setColour(juce::Colours::black);
+    g.setColour(juce::Colour(0xff101214));
     g.drawEllipse(area, 2.0f);
 
-    g.setColour(juce::Colours::white);
+    g.setColour(juce::Colours::white.withAlpha(0.9f));
     g.drawText(label, (int)x + 8, (int)y - 10, 28, 20, juce::Justification::left);
   }
 };
 
-class XYFormantPad : public juce::Component
+class XYFormantPad : public juce::Component, private juce::Timer
 {
 public:
   explicit XYFormantPad(SpectralFormantMorpherAudioProcessor &p)
       : processor(p)
   {
+    setMouseCursor(juce::MouseCursor::CrosshairCursor);
+    startTimerHz(30);
+  }
+
+  ~XYFormantPad() override
+  {
+    stopTimer();
   }
 
   void paint(juce::Graphics &g) override;
   void mouseDown(const juce::MouseEvent &event) override;
   void mouseDrag(const juce::MouseEvent &event) override;
+  void mouseUp(const juce::MouseEvent &event) override;
 
 private:
   SpectralFormantMorpherAudioProcessor &processor;
+  bool dragging = false;
 
+  void timerCallback() override;
+  void beginGesture();
+  void endGesture();
   void updateFromPosition(juce::Point<float> pos);
 };
 
@@ -145,7 +175,7 @@ private:
   std::array<juce::Label, dsp::SpectralProcessor::numFormants - 2> formantLabels;
   std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> formantAttachments;
 
-  juce::TextButton loadSourceButton{"ソース音源を読み込む"};
+  juce::TextButton loadSourceButton{"参照音源を解析"};
   juce::Label statusLabel;
   std::unique_ptr<juce::FileChooser> sourceFileChooser;
 

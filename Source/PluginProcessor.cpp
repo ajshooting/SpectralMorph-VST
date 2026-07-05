@@ -2,6 +2,7 @@
 #include "PluginEditor.h"
 
 #include <array>
+#include <cmath>
 
 namespace
 {
@@ -101,41 +102,53 @@ bool SpectralFormantMorpherAudioProcessor::analyzeSourceFileAndApplyFormants(con
 {
   if (!sourceFile.existsAsFile())
   {
-    message = "ソース音源ファイルが見つかりません。";
+    message = "参照音源ファイルが見つかりません。";
     return false;
   }
 
   std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(sourceFile));
   if (reader == nullptr)
   {
-    message = "音源の読み込みに失敗しました。対応フォーマットを確認してください。";
+    message = "参照音源の読み込みに失敗しました。対応フォーマットを確認してください。";
     return false;
   }
 
   const juce::int64 maxReadSamples = juce::jmin<juce::int64>((juce::int64)(reader->sampleRate * 6.0), reader->lengthInSamples);
   if (maxReadSamples <= 0)
   {
-    message = "音源に有効なサンプルがありません。";
+    message = "参照音源に有効なサンプルがありません。";
     return false;
   }
 
-  juce::AudioBuffer<float> sourceBuffer(1, (int)maxReadSamples);
-  if (!reader->read(&sourceBuffer, 0, (int)maxReadSamples, 0, true, true))
+  const int channelsToRead = std::min(2, std::max(1, (int)reader->numChannels));
+  juce::AudioBuffer<float> fileBuffer(channelsToRead, (int)maxReadSamples);
+  fileBuffer.clear();
+
+  if (!reader->read(&fileBuffer, 0, (int)maxReadSamples, 0, true, channelsToRead > 1))
   {
-    message = "音源サンプルの読取に失敗しました。";
+    message = "参照音源サンプルの読取に失敗しました。";
     return false;
   }
 
-  auto estimated = spectralProcessor.estimateFormantsFromBuffer(sourceBuffer, reader->sampleRate);
+  juce::AudioBuffer<float> monoBuffer(1, (int)maxReadSamples);
+  monoBuffer.clear();
+
+  const float monoGain = 1.0f / (float)channelsToRead;
+  for (int ch = 0; ch < channelsToRead; ++ch)
+    monoBuffer.addFrom(0, 0, fileBuffer, ch, 0, (int)maxReadSamples, monoGain);
+
+  auto estimated = spectralProcessor.estimateFormantsFromBuffer(monoBuffer, reader->sampleRate);
 
   for (size_t i = 0; i < estimated.size(); ++i)
   {
     if (auto *param = apvts.getParameter(formantParamId(i)))
-      param->setValueNotifyingHost(param->convertTo0to1(estimated[i]));
+    {
+      const float normalised = juce::jlimit(0.0f, 1.0f, param->convertTo0to1(estimated[i]));
+      param->setValueNotifyingHost(normalised);
+    }
   }
 
-  spectralProcessor.setTargetFormantsHz(estimated);
-  message = "ソース音源からF1〜F15を推定して適用しました。";
+  message = "参照音源からF1〜F15を推定して適用しました。";
   return true;
 }
 
@@ -276,11 +289,10 @@ void SpectralFormantMorpherAudioProcessor::processBlock(juce::AudioBuffer<float>
       // Mix: 0 = dry, 1 = wet
       float sample = dry[i] * (1.0f - mix) + wet[i] * mix;
 
-      // Apply output gain
       sample *= outputGain;
 
-      // Safety soft clip to prevent extreme values
-      sample = std::tanh(sample);
+      if (!std::isfinite(sample))
+        sample = 0.0f;
 
       wet[i] = sample;
     }

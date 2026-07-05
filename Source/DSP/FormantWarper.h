@@ -39,8 +39,14 @@ public:
      * @param numBins Number of frequency bins in the envelope.
      * @param points User-defined control points (e.g., F1->NewF1, F2->NewF2).
      */
-    void calculateWarpMap(int numBins, std::vector<WarpingPoint> points)
+    void calculateWarpMap(int numBins, std::vector<WarpingPoint>& points)
     {
+        if (numBins <= 0)
+        {
+            warpMap.clear();
+            return;
+        }
+
         if (warpMap.size() != (size_t)numBins)
             warpMap.resize((size_t)numBins);
 

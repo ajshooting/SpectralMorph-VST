@@ -6,13 +6,13 @@ A real-time VST3/AU audio plugin for vocal timbre morphing with direct control o
 
 - **F1/F2 XY Pad:** Move one point in XY space to control `F1` (Y axis) and `F2` (X axis) in Hz.
 - **F3〜F15 Mixer-style Sliders:** Each higher formant can be controlled independently with vertical sliders.
-- **Source Audio Import:** Load a source file (`wav/aiff/flac/mp3`) and auto-estimate/apply `F1〜F15` as the target template.
+- **Reference Audio Import:** Load a reference file (`wav/aiff/flac/mp3`) and auto-estimate/apply `F1〜F15` as the target template.
 - **Real-time Morphing:** During playback, the current input envelope is warped toward the configured `F1〜F15` targets.
 - **Real-time Visualization:** Spectrum + warped envelope preview while processing.
 
 ## Technical Details
 
-The plugin is built with **JUCE 8** and **C++20**.
+The plugin is built with **JUCE 8.0.12** and **C++20**.
 
 ### DSP Pipeline
 
@@ -23,7 +23,7 @@ The plugin is built with **JUCE 8** and **C++20**.
     - Forward FFT -> Exponentiation to get the Linear Envelope.
 3.  **Formant Detection:** Detect up to 15 envelope peaks as the current input formants.
 4.  **Warping:** Build a piecewise-linear mapping from detected formants to target `F1〜F15` bins.
-5.  **Resynthesis:** Apply warped envelope to the source spectral fine structure.
+5.  **Resynthesis:** Apply the warped envelope to the input spectral fine structure.
 6.  **Reconstruction:** Inverse FFT and overlap-add synthesis.
 
 ## Build Instructions

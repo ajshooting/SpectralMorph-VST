@@ -12,9 +12,8 @@ namespace dsp
     fft = std::make_unique<juce::dsp::FFT>(fftOrder);
     window = std::make_unique<juce::dsp::WindowingFunction<float>>(fftSize, juce::dsp::WindowingFunction<float>::hann);
 
-    inputFifo.resize(fftSize, 0.0f);
-    outputAccumulator.resize(fftSize, 0.0f);
     fftBuffer.resize(fftSize * 2, 0.0f);
+    warpPoints.reserve(numFormants + 2);
 
     const int numBins = fftSize / 2 + 1;
     magnitudeSpectrum.resize((size_t)numBins);
@@ -31,16 +30,36 @@ namespace dsp
   {
     currentSampleRate = spec.sampleRate;
     envelopeExtractor.prepare(fftSize);
+
+    const auto numChannels = std::max<size_t>(1, spec.numChannels);
+    channelStates.resize(numChannels);
+    for (auto &state : channelStates)
+      initialiseChannelState(state);
+
     reset();
+  }
+
+  void SpectralProcessor::initialiseChannelState(ChannelState &state) const
+  {
+    state.inputFifo.resize(fftSize, 0.0f);
+    state.outputAccumulator.resize(fftSize, 0.0f);
+    state.frame.resize(fftSize, 0.0f);
+    state.hopCounter = 0;
+    state.inputWritePos = 0;
+    state.outputReadPos = 0;
   }
 
   void SpectralProcessor::reset()
   {
-    std::fill(inputFifo.begin(), inputFifo.end(), 0.0f);
-    std::fill(outputAccumulator.begin(), outputAccumulator.end(), 0.0f);
-    hopCounter = 0;
-    inputWritePos = 0;
-    outputReadPos = 0;
+    for (auto &state : channelStates)
+    {
+      std::fill(state.inputFifo.begin(), state.inputFifo.end(), 0.0f);
+      std::fill(state.outputAccumulator.begin(), state.outputAccumulator.end(), 0.0f);
+      std::fill(state.frame.begin(), state.frame.end(), 0.0f);
+      state.hopCounter = 0;
+      state.inputWritePos = 0;
+      state.outputReadPos = 0;
+    }
   }
 
   void SpectralProcessor::setTargetFormantsHz(const std::array<float, numFormants> &targetHz)
@@ -125,12 +144,25 @@ namespace dsp
   std::array<float, SpectralProcessor::numFormants> SpectralProcessor::estimateFormantsFromBuffer(const juce::AudioBuffer<float> &sourceBuffer,
                                                                                                   double sourceSampleRate)
   {
-    std::array<float, numFormants> estimatedHz = targetFormantsHz;
+    std::array<float, numFormants> estimatedHz{
+        500.0f, 1500.0f, 2500.0f, 3200.0f, 3800.0f,
+        4400.0f, 5000.0f, 5600.0f, 6200.0f, 6800.0f,
+        7400.0f, 8000.0f, 8600.0f, 9200.0f, 9800.0f};
 
     if (sourceBuffer.getNumSamples() <= 0 || sourceBuffer.getNumChannels() <= 0)
       return estimatedHz;
 
+    juce::dsp::FFT analysisFft(fftOrder);
+    juce::dsp::WindowingFunction<float> analysisWindow(fftSize, juce::dsp::WindowingFunction<float>::hann);
+    EnvelopeExtractor analysisEnvelopeExtractor;
+    analysisEnvelopeExtractor.prepare(fftSize);
+
+    const int numBins = fftSize / 2 + 1;
     std::vector<float> frame((size_t)fftSize, 0.0f);
+    std::vector<float> analysisFftBuffer((size_t)fftSize * 2, 0.0f);
+    std::vector<float> analysisMagnitude((size_t)numBins, 0.0f);
+    std::vector<float> analysisEnvelope((size_t)numBins, 0.0f);
+
     const int totalSamples = sourceBuffer.getNumSamples();
     const int start = std::max(0, (totalSamples / 2) - (fftSize / 2));
     const int copyCount = std::min(fftSize, totalSamples - start);
@@ -138,25 +170,23 @@ namespace dsp
     const float *readPtr = sourceBuffer.getReadPointer(0);
     std::copy(readPtr + start, readPtr + start + copyCount, frame.begin());
 
-    window->multiplyWithWindowingTable(frame.data(), fftSize);
+    analysisWindow.multiplyWithWindowingTable(frame.data(), fftSize);
 
-    std::fill(fftBuffer.begin(), fftBuffer.end(), 0.0f);
-    std::copy(frame.begin(), frame.end(), fftBuffer.begin());
+    std::copy(frame.begin(), frame.end(), analysisFftBuffer.begin());
 
-    fft->performRealOnlyForwardTransform(fftBuffer.data());
+    analysisFft.performRealOnlyForwardTransform(analysisFftBuffer.data());
 
-    const int numBins = fftSize / 2 + 1;
     for (int i = 0; i < numBins; ++i)
     {
-      const float real = fftBuffer[(size_t)i * 2];
-      const float imag = fftBuffer[(size_t)i * 2 + 1];
-      magnitudeSpectrum[(size_t)i] = std::sqrt(real * real + imag * imag);
+      const float real = analysisFftBuffer[(size_t)i * 2];
+      const float imag = analysisFftBuffer[(size_t)i * 2 + 1];
+      analysisMagnitude[(size_t)i] = std::sqrt(real * real + imag * imag);
     }
 
-    envelopeExtractor.process(magnitudeSpectrum, extractedEnvelope);
+    analysisEnvelopeExtractor.process(analysisMagnitude, analysisEnvelope);
 
     std::array<float, numFormants> bins{};
-    detectFormants(extractedEnvelope, sourceSampleRate, bins);
+    detectFormants(analysisEnvelope, sourceSampleRate, bins);
 
     const float hzPerBin = (float)sourceSampleRate / (float)fftSize;
     for (size_t i = 0; i < numFormants; ++i)
@@ -165,7 +195,7 @@ namespace dsp
     return estimatedHz;
   }
 
-  void SpectralProcessor::processBlock(std::vector<float> &data)
+  void SpectralProcessor::processFrame(std::vector<float> &data, bool updateVisualization)
   {
     // --- Analysis ---
     window->multiplyWithWindowingTable(data.data(), fftSize);
@@ -189,9 +219,8 @@ namespace dsp
     // --- Formant Detection & Warping ---
     detectFormants(extractedEnvelope, currentSampleRate, currentFormantBins);
 
-    std::vector<WarpingPoint> points;
-    points.reserve(numFormants + 2);
-    points.push_back({0.0f, 0.0f});
+    warpPoints.clear();
+    warpPoints.push_back({0.0f, 0.0f});
 
     const float hzPerBin = (float)currentSampleRate / (float)fftSize;
     float lastDst = 0.0f;
@@ -200,22 +229,22 @@ namespace dsp
       const float src = currentFormantBins[i];
       const float targetBin = targetFormantsHz[i] / std::max(1.0f, hzPerBin);
       const float dst = juce::jlimit(lastDst + 1.0f, (float)(numBins - 2), targetBin);
-      points.push_back({src, dst});
+      warpPoints.push_back({src, dst});
       lastDst = dst;
     }
 
-    points.push_back({(float)(numBins - 1), (float)(numBins - 1)});
+    warpPoints.push_back({(float)(numBins - 1), (float)(numBins - 1)});
 
-    formantWarper.calculateWarpMap(numBins, points);
+    formantWarper.calculateWarpMap(numBins, warpPoints);
     formantWarper.process(extractedEnvelope, warpedEnvelope);
 
     // --- Visualization data (lock-free tryEnter) ---
-    if (visualizationLock.tryEnter())
+    if (updateVisualization && visualizationLock.tryEnter())
     {
       visSpectrum = magnitudeSpectrum;
       visEnvelope = warpedEnvelope;
-      visF1 = points[1].dstBin;
-      visF2 = points[2].dstBin;
+      visF1 = warpPoints[1].dstBin;
+      visF2 = warpPoints[2].dstBin;
       visualizationLock.exit();
     }
 
@@ -252,48 +281,57 @@ namespace dsp
     const auto &inputBlock = context.getInputBlock();
     auto &outputBlock = context.getOutputBlock();
     const size_t numSamples = inputBlock.getNumSamples();
-    const size_t numChannels = inputBlock.getNumChannels();
+    const size_t inputChannels = inputBlock.getNumChannels();
+    const size_t outputChannels = outputBlock.getNumChannels();
 
-    auto *src = inputBlock.getChannelPointer(0);
-    auto *dst = outputBlock.getChannelPointer(0);
+    if (inputChannels == 0 || outputChannels == 0)
+      return;
 
-    for (size_t i = 0; i < numSamples; ++i)
+    if (channelStates.size() < outputChannels)
     {
-      // Write new input sample into circular buffer
-      inputFifo[(size_t)inputWritePos] = src[i];
-      inputWritePos = (inputWritePos + 1) % fftSize;
-
-      // Read output sample from circular accumulator
-      dst[i] = outputAccumulator[(size_t)outputReadPos];
-      outputAccumulator[(size_t)outputReadPos] = 0.0f;
-      outputReadPos = (outputReadPos + 1) % fftSize;
-
-      ++hopCounter;
-      if (hopCounter >= hopSize)
-      {
-        hopCounter = 0;
-
-        // Assemble frame from circular input buffer (oldest to newest)
-        std::vector<float> frame((size_t)fftSize);
-        for (int k = 0; k < fftSize; ++k)
-          frame[(size_t)k] = inputFifo[(size_t)((inputWritePos + k) % fftSize)];
-
-        processBlock(frame);
-
-        // Overlap-add into circular output accumulator
-        for (int k = 0; k < fftSize; ++k)
-        {
-          const int pos = (outputReadPos + k) % fftSize;
-          outputAccumulator[(size_t)pos] += frame[(size_t)k];
-        }
-      }
+      const auto oldSize = channelStates.size();
+      channelStates.resize(outputChannels);
+      for (size_t ch = oldSize; ch < channelStates.size(); ++ch)
+        initialiseChannelState(channelStates[ch]);
     }
 
-    // Copy channel 0 result to all other channels
-    for (size_t ch = 1; ch < numChannels; ++ch)
+    for (size_t ch = 0; ch < outputChannels; ++ch)
     {
-      auto *chDst = outputBlock.getChannelPointer(ch);
-      std::copy(dst, dst + numSamples, chDst);
+      auto &state = channelStates[ch];
+      const auto sourceChannel = std::min(ch, inputChannels - 1);
+      const auto *src = inputBlock.getChannelPointer(sourceChannel);
+      auto *dst = outputBlock.getChannelPointer(ch);
+
+      for (size_t i = 0; i < numSamples; ++i)
+      {
+        // Write new input sample into circular buffer
+        state.inputFifo[(size_t)state.inputWritePos] = src[i];
+        state.inputWritePos = (state.inputWritePos + 1) % fftSize;
+
+        // Read output sample from circular accumulator
+        dst[i] = state.outputAccumulator[(size_t)state.outputReadPos];
+        state.outputAccumulator[(size_t)state.outputReadPos] = 0.0f;
+        state.outputReadPos = (state.outputReadPos + 1) % fftSize;
+
+        ++state.hopCounter;
+        if (state.hopCounter >= hopSize)
+        {
+          state.hopCounter = 0;
+
+          // Assemble frame from circular input buffer (oldest to newest)
+          for (int k = 0; k < fftSize; ++k)
+            state.frame[(size_t)k] = state.inputFifo[(size_t)((state.inputWritePos + k) % fftSize)];
+
+          processFrame(state.frame, ch == 0);
+
+          // Overlap-add into circular output accumulator
+          for (int k = 0; k < fftSize; ++k)
+          {
+            const int pos = (state.outputReadPos + k) % fftSize;
+            state.outputAccumulator[(size_t)pos] += state.frame[(size_t)k];
+          }
+        }
+      }
     }
   }
 
