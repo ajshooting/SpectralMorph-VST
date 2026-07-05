@@ -24,6 +24,21 @@ namespace
   }
 }
 
+void SpectralFormantMorpherAudioProcessorEditor::configureUtilityButton(juce::TextButton &button)
+{
+  button.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff273038));
+  button.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff334047));
+  button.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.92f));
+  button.addListener(this);
+  addAndMakeVisible(button);
+}
+
+void SpectralFormantMorpherAudioProcessorEditor::setStatusMessage(const juce::String &message, bool ok)
+{
+  statusLabel.setText(message, juce::dontSendNotification);
+  statusLabel.setColour(juce::Label::textColourId, ok ? juce::Colour(0xff7ee082) : juce::Colour(0xfff4c95d));
+}
+
 void XYFormantPad::paint(juce::Graphics &g)
 {
   auto bounds = getLocalBounds().toFloat().reduced(10.0f);
@@ -198,12 +213,11 @@ SpectralFormantMorpherAudioProcessorEditor::SpectralFormantMorpherAudioProcessor
   gainAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
       audioProcessor.getAPVTS(), "OUTPUT_GAIN", gainSlider);
 
-  loadSourceButton.setButtonText("参照音源を解析");
-  loadSourceButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff273038));
-  loadSourceButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff334047));
-  loadSourceButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.92f));
-  loadSourceButton.addListener(this);
-  addAndMakeVisible(loadSourceButton);
+  configureUtilityButton(loadSourceButton);
+  configureUtilityButton(copyProfileButton);
+  configureUtilityButton(pasteProfileButton);
+  configureUtilityButton(exportProfileButton);
+  configureUtilityButton(importProfileButton);
 
   statusLabel.setText("参照音源: 未読込", juce::dontSendNotification);
   statusLabel.setJustificationType(juce::Justification::centredLeft);
@@ -218,6 +232,10 @@ SpectralFormantMorpherAudioProcessorEditor::SpectralFormantMorpherAudioProcessor
 SpectralFormantMorpherAudioProcessorEditor::~SpectralFormantMorpherAudioProcessorEditor()
 {
   loadSourceButton.removeListener(this);
+  copyProfileButton.removeListener(this);
+  pasteProfileButton.removeListener(this);
+  exportProfileButton.removeListener(this);
+  importProfileButton.removeListener(this);
 }
 
 void SpectralFormantMorpherAudioProcessorEditor::paint(juce::Graphics &g)
@@ -235,6 +253,15 @@ void SpectralFormantMorpherAudioProcessorEditor::resized()
 
   auto top = area.removeFromTop(38);
   loadSourceButton.setBounds(top.removeFromLeft(180));
+  top.removeFromLeft(8);
+  copyProfileButton.setBounds(top.removeFromLeft(64));
+  top.removeFromLeft(6);
+  pasteProfileButton.setBounds(top.removeFromLeft(64));
+  top.removeFromLeft(6);
+  exportProfileButton.setBounds(top.removeFromLeft(74));
+  top.removeFromLeft(6);
+  importProfileButton.setBounds(top.removeFromLeft(74));
+  top.removeFromLeft(8);
   statusLabel.setBounds(top.reduced(8, 0));
 
   area.removeFromTop(12);
@@ -275,6 +302,30 @@ void SpectralFormantMorpherAudioProcessorEditor::resized()
 
 void SpectralFormantMorpherAudioProcessorEditor::buttonClicked(juce::Button *button)
 {
+  if (button == &copyProfileButton)
+  {
+    copyVoiceProfileToClipboard();
+    return;
+  }
+
+  if (button == &pasteProfileButton)
+  {
+    pasteVoiceProfileFromClipboard();
+    return;
+  }
+
+  if (button == &exportProfileButton)
+  {
+    exportVoiceProfile();
+    return;
+  }
+
+  if (button == &importProfileButton)
+  {
+    importVoiceProfile();
+    return;
+  }
+
   if (button != &loadSourceButton)
     return;
 
@@ -293,7 +344,64 @@ void SpectralFormantMorpherAudioProcessorEditor::buttonClicked(juce::Button *but
         juce::String message;
         const bool ok = audioProcessor.analyzeSourceFileAndApplyFormants(file, message);
 
-        statusLabel.setText(message, juce::dontSendNotification);
-        statusLabel.setColour(juce::Label::textColourId, ok ? juce::Colour(0xff7ee082) : juce::Colour(0xfff4c95d));
+        setStatusMessage(message, ok);
+        xyPad.repaint(); });
+}
+
+void SpectralFormantMorpherAudioProcessorEditor::copyVoiceProfileToClipboard()
+{
+  juce::SystemClipboard::copyTextToClipboard(audioProcessor.createVoiceProfileJson());
+  setStatusMessage("Voice Profileをクリップボードにコピーしました。", true);
+}
+
+void SpectralFormantMorpherAudioProcessorEditor::pasteVoiceProfileFromClipboard()
+{
+  juce::String message;
+  const bool ok = audioProcessor.applyVoiceProfileJson(juce::SystemClipboard::getTextFromClipboard(), message);
+  setStatusMessage(message, ok);
+  xyPad.repaint();
+}
+
+void SpectralFormantMorpherAudioProcessorEditor::exportVoiceProfile()
+{
+  profileFileChooser = std::make_unique<juce::FileChooser>(
+      "Voice Profileを書き出し",
+      juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("SpectralFormantMorpher.sfmprofile"),
+      "*.sfmprofile;*.json");
+
+  constexpr int chooserFlags = juce::FileBrowserComponent::saveMode |
+                               juce::FileBrowserComponent::canSelectFiles |
+                               juce::FileBrowserComponent::warnAboutOverwriting;
+
+  profileFileChooser->launchAsync(chooserFlags, [this](const juce::FileChooser &chooser)
+                                  {
+        auto file = chooser.getResult();
+        if (file == juce::File())
+            return;
+
+        if (!file.hasFileExtension(".sfmprofile") && !file.hasFileExtension(".json"))
+            file = file.withFileExtension(".sfmprofile");
+
+        const bool ok = file.replaceWithText(audioProcessor.createVoiceProfileJson());
+        setStatusMessage(ok ? "Voice Profileを書き出しました。" : "Voice Profileの書き出しに失敗しました。", ok); });
+}
+
+void SpectralFormantMorpherAudioProcessorEditor::importVoiceProfile()
+{
+  profileFileChooser = std::make_unique<juce::FileChooser>(
+      "Voice Profileを読み込み",
+      juce::File(),
+      "*.sfmprofile;*.json");
+
+  constexpr int chooserFlags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
+  profileFileChooser->launchAsync(chooserFlags, [this](const juce::FileChooser &chooser)
+                                  {
+        const auto file = chooser.getResult();
+        if (!file.existsAsFile())
+            return;
+
+        juce::String message;
+        const bool ok = audioProcessor.applyVoiceProfileJson(file.loadFileAsString(), message);
+        setStatusMessage(message, ok);
         xyPad.repaint(); });
 }

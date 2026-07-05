@@ -15,6 +15,34 @@ namespace
   {
     return "FORMANT_" + juce::String((int)index + 1);
   }
+
+  float readParameterValue(const juce::AudioProcessorValueTreeState &apvts, const juce::String &parameterID, float fallback)
+  {
+    if (const auto *value = apvts.getRawParameterValue(parameterID))
+      return value->load();
+
+    return fallback;
+  }
+
+  bool setParameterPlainValue(juce::AudioProcessorValueTreeState &apvts, const juce::String &parameterID, float value)
+  {
+    if (auto *param = apvts.getParameter(parameterID))
+    {
+      const float normalised = juce::jlimit(0.0f, 1.0f, param->convertTo0to1(value));
+      param->beginChangeGesture();
+      param->setValueNotifyingHost(normalised);
+      param->endChangeGesture();
+      return true;
+    }
+
+    return false;
+  }
+
+  float getProfileNumber(const juce::DynamicObject &object, const juce::Identifier &propertyName, float fallback)
+  {
+    const auto value = object.getProperty(propertyName);
+    return value.isVoid() ? fallback : (float)(double)value;
+  }
 }
 
 SpectralFormantMorpherAudioProcessor::SpectralFormantMorpherAudioProcessor()
@@ -149,6 +177,67 @@ bool SpectralFormantMorpherAudioProcessor::analyzeSourceFileAndApplyFormants(con
   }
 
   message = "参照音源からF1〜F15を推定して適用しました。";
+  return true;
+}
+
+juce::String SpectralFormantMorpherAudioProcessor::createVoiceProfileJson() const
+{
+  juce::DynamicObject::Ptr profile = new juce::DynamicObject();
+  profile->setProperty("type", "SpectralFormantMorpherProfile");
+  profile->setProperty("version", 1);
+  profile->setProperty("product", "Spectral Formant Morpher");
+
+  juce::Array<juce::var> formants;
+  for (size_t i = 0; i < dsp::SpectralProcessor::numFormants; ++i)
+    formants.add(readParameterValue(apvts, formantParamId(i), defaultFormantsHz[i]));
+
+  profile->setProperty("formantsHz", formants);
+  profile->setProperty("mix", readParameterValue(apvts, "MIX", 100.0f));
+  profile->setProperty("outputGainDb", readParameterValue(apvts, "OUTPUT_GAIN", 0.0f));
+
+  return juce::JSON::toString(juce::var(profile.get()), true);
+}
+
+bool SpectralFormantMorpherAudioProcessor::applyVoiceProfileJson(const juce::String &jsonText, juce::String &message)
+{
+  juce::var parsed;
+  const auto parseResult = juce::JSON::parse(jsonText, parsed);
+  if (parseResult.failed())
+  {
+    message = "プロファイルJSONの解析に失敗しました: " + parseResult.getErrorMessage();
+    return false;
+  }
+
+  auto *object = parsed.getDynamicObject();
+  if (object == nullptr)
+  {
+    message = "プロファイルはJSONオブジェクトである必要があります。";
+    return false;
+  }
+
+  const auto type = object->getProperty("type").toString();
+  if (type.isNotEmpty() && type != "SpectralFormantMorpherProfile")
+  {
+    message = "このプラグイン用のプロファイルではありません。";
+    return false;
+  }
+
+  const auto formantsVar = object->getProperty("formantsHz");
+  auto *formants = formantsVar.getArray();
+  if (formants == nullptr || formants->size() < (int)dsp::SpectralProcessor::numFormants)
+  {
+    message = "プロファイルにF1〜F15が含まれていません。";
+    return false;
+  }
+
+  for (size_t i = 0; i < dsp::SpectralProcessor::numFormants; ++i)
+    setParameterPlainValue(apvts, formantParamId(i), (float)(double)(*formants)[(int)i]);
+
+  setParameterPlainValue(apvts, "MIX", getProfileNumber(*object, "mix", readParameterValue(apvts, "MIX", 100.0f)));
+  setParameterPlainValue(apvts, "OUTPUT_GAIN", getProfileNumber(*object, "outputGainDb", readParameterValue(apvts, "OUTPUT_GAIN", 0.0f)));
+
+  spectralProcessor.setTargetFormantsHz(collectTargetFormantsFromParameters());
+  message = "Voice Profileを適用しました。";
   return true;
 }
 

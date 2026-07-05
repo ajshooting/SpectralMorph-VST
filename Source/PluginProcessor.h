@@ -42,6 +42,8 @@ public:
     void parameterChanged(const juce::String &parameterID, float newValue) override;
 
     bool analyzeSourceFileAndApplyFormants(const juce::File &sourceFile, juce::String &message);
+    juce::String createVoiceProfileJson() const;
+    bool applyVoiceProfileJson(const juce::String &jsonText, juce::String &message);
 
     juce::AudioProcessorValueTreeState &getAPVTS() { return apvts; }
     dsp::SpectralProcessor &getSpectralProcessor() { return spectralProcessor; }

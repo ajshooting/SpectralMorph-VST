@@ -7,6 +7,7 @@ A real-time VST3/AU audio plugin for vocal timbre morphing with direct control o
 - **F1/F2 XY Pad:** Move one point in XY space to control `F1` (Y axis) and `F2` (X axis) in Hz.
 - **F3〜F15 Mixer-style Sliders:** Each higher formant can be controlled independently with vertical sliders.
 - **Reference Audio Import:** Load a reference file (`wav/aiff/flac/mp3`) and auto-estimate/apply `F1〜F15` as the target template.
+- **Voice Profile Sharing:** Copy/paste or export/import `F1〜F15`, mix, and output gain as a JSON `.sfmprofile`.
 - **Real-time Morphing:** During playback, the current input envelope is warped toward the configured `F1〜F15` targets.
 - **Real-time Visualization:** Spectrum + warped envelope preview while processing.
 

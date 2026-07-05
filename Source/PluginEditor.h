@@ -176,8 +176,13 @@ private:
   std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> formantAttachments;
 
   juce::TextButton loadSourceButton{"参照音源を解析"};
+  juce::TextButton copyProfileButton{"Copy"};
+  juce::TextButton pasteProfileButton{"Paste"};
+  juce::TextButton exportProfileButton{"Export"};
+  juce::TextButton importProfileButton{"Import"};
   juce::Label statusLabel;
   std::unique_ptr<juce::FileChooser> sourceFileChooser;
+  std::unique_ptr<juce::FileChooser> profileFileChooser;
 
   // Mix & Output Gain controls
   juce::Slider mixSlider;
@@ -189,6 +194,12 @@ private:
   std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> gainAttachment;
 
   void buttonClicked(juce::Button *button) override;
+  void configureUtilityButton(juce::TextButton &button);
+  void setStatusMessage(const juce::String &message, bool ok);
+  void copyVoiceProfileToClipboard();
+  void pasteVoiceProfileFromClipboard();
+  void exportVoiceProfile();
+  void importVoiceProfile();
 
   JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SpectralFormantMorpherAudioProcessorEditor)
 };
