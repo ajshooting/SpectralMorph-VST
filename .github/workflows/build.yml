@@ -12,7 +12,7 @@ jobs:
         os: [ubuntu-latest, macos-14, windows-latest]
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
 
     - name: Install dependencies (Linux)
       if: runner.os == 'Linux'
@@ -37,7 +37,7 @@ jobs:
         pkg-config --list-all | grep webkit
 
     - name: Configure CMake
-      run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DSFM_COPY_PLUGIN_AFTER_BUILD=OFF
 
     - name: Build
       run: cmake --build build --config Release
@@ -46,3 +46,38 @@ jobs:
       run: |
         cd build
         ctest -C Release --output-on-failure
+
+    - name: Package plugin artifacts
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        artifact_dir="$PWD/packaged"
+        mkdir -p "$artifact_dir"
+        cd build/SpectralFormantMorpher_artefacts/Release
+
+        case "${{ runner.os }}" in
+          macOS)
+            cmake -E tar czf "$artifact_dir/SpectralFormantMorpher-macos.tar.gz" \
+              "VST3/Spectral Formant Morpher.vst3" \
+              "AU/Spectral Formant Morpher.component" \
+              "Standalone/Spectral Formant Morpher.app"
+            ;;
+          Windows)
+            cmake -E tar cf "$artifact_dir/SpectralFormantMorpher-windows.zip" --format=zip \
+              "VST3/Spectral Formant Morpher.vst3" \
+              "Standalone/Spectral Formant Morpher.exe"
+            ;;
+          Linux)
+            cmake -E tar czf "$artifact_dir/SpectralFormantMorpher-linux.tar.gz" \
+              "VST3/Spectral Formant Morpher.vst3" \
+              "Standalone/Spectral Formant Morpher"
+            ;;
+        esac
+
+    - name: Upload plugin artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: SpectralFormantMorpher-${{ runner.os }}
+        path: packaged/*
+        if-no-files-found: error

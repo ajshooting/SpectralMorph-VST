@@ -5,6 +5,8 @@ project(SpectralFormantMorpher VERSION 0.1.0)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(SFM_COPY_PLUGIN_AFTER_BUILD "Copy built plugins to the system plugin folders after building" ON)
+
 if(APPLE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS deployment version" FORCE)
 endif()
@@ -42,7 +44,7 @@ juce_add_plugin(SpectralFormantMorpher
     NEEDS_MIDI_OUTPUT FALSE
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTED TRUE
-    COPY_PLUGIN_AFTER_BUILD TRUE
+    COPY_PLUGIN_AFTER_BUILD ${SFM_COPY_PLUGIN_AFTER_BUILD}
     PLUGIN_MANUFACTURER_CODE AuTe
     PLUGIN_CODE SpFm
     FORMATS VST3 AU Standalone
