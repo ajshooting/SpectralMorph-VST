@@ -3,9 +3,11 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <array>
+#include <atomic>
+#include <functional>
 #include "DSP/SpectralProcessor.h"
 
-class SpectralFormantMorpherAudioProcessor : public juce::AudioProcessor, public juce::AudioProcessorValueTreeState::Listener
+class SpectralFormantMorpherAudioProcessor : public juce::AudioProcessor
 {
 public:
     SpectralFormantMorpherAudioProcessor();
@@ -19,6 +21,7 @@ public:
 #endif
 
     void processBlock(juce::AudioBuffer<float> &, juce::MidiBuffer &) override;
+    void processBlockBypassed(juce::AudioBuffer<float> &, juce::MidiBuffer &) override;
 
     juce::AudioProcessorEditor *createEditor() override;
     bool hasEditor() const override;
@@ -39,11 +42,18 @@ public:
     void getStateInformation(juce::MemoryBlock &destData) override;
     void setStateInformation(const void *data, int sizeInBytes) override;
 
-    void parameterChanged(const juce::String &parameterID, float newValue) override;
-
-    bool analyzeSourceFileAndApplyFormants(const juce::File &sourceFile, juce::String &message);
+    static bool analyzeSourceFile(
+        const juce::File &sourceFile,
+        std::array<float, dsp::SpectralProcessor::numFormants> &estimatedHz,
+        size_t &detectedFormantCount,
+        juce::String &message,
+        const std::function<bool()> &shouldCancel = {});
+    void applyReferenceFormants(
+        const std::array<float, dsp::SpectralProcessor::numFormants> &estimatedHz,
+        size_t detectedFormantCount);
     juce::String createVoiceProfileJson() const;
     bool applyVoiceProfileJson(const juce::String &jsonText, juce::String &message);
+    void normaliseFormantParameters();
 
     juce::AudioProcessorValueTreeState &getAPVTS() { return apvts; }
     dsp::SpectralProcessor &getSpectralProcessor() { return spectralProcessor; }
@@ -54,10 +64,19 @@ private:
     std::array<float, dsp::SpectralProcessor::numFormants> collectTargetFormantsFromParameters() const;
 
     dsp::SpectralProcessor spectralProcessor;
-    juce::AudioFormatManager formatManager;
+    std::array<std::atomic<float> *, dsp::SpectralProcessor::numFormants> formantParameterValues{};
+    std::atomic<float> *mixParameterValue = nullptr;
+    std::atomic<float> *outputGainParameterValue = nullptr;
 
-    // Dry buffer for dry/wet mixing
+    // The STFT wet path is delayed by one FFT frame. Delay dry by the same
+    // amount so intermediate mix values stay phase-aligned.
     juce::AudioBuffer<float> dryBuffer;
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> dryDelayLine{
+        dsp::SpectralProcessor::getLatencySamples()};
+
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> mixSmoother;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> outputGainSmoother;
+    bool isNormalisingFormants = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SpectralFormantMorpherAudioProcessor)
 };

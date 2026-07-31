@@ -39,10 +39,70 @@ namespace
     return false;
   }
 
-  float getProfileNumber(const juce::DynamicObject &object, const juce::Identifier &propertyName, float fallback)
+  bool getProfileNumber(const juce::DynamicObject &object,
+                        const juce::Identifier &propertyName,
+                        float fallback,
+                        float &result)
   {
     const auto value = object.getProperty(propertyName);
-    return value.isVoid() ? fallback : (float)(double)value;
+    if (value.isVoid())
+    {
+      result = fallback;
+      return true;
+    }
+
+    if (!value.isInt() && !value.isInt64() && !value.isDouble())
+      return false;
+
+    result = (float)(double)value;
+    return std::isfinite(result);
+  }
+
+  bool isParameterValueInRange(juce::AudioProcessorValueTreeState &apvts,
+                               const juce::String &parameterID,
+                               float value)
+  {
+    if (!std::isfinite(value))
+      return false;
+
+    if (auto *param = apvts.getParameter(parameterID))
+    {
+      const float normalised = param->convertTo0to1(value);
+      const float roundTripped = param->convertFrom0to1(normalised);
+      return std::isfinite(normalised)
+          && std::isfinite(roundTripped)
+          && std::abs(roundTripped - value) <= 1.0e-3f;
+    }
+
+    return false;
+  }
+
+  void normaliseFormantValues(
+      juce::AudioProcessorValueTreeState &apvts,
+      std::array<float, dsp::SpectralProcessor::numFormants> &values)
+  {
+    std::array<float, dsp::SpectralProcessor::numFormants> minimums{};
+    std::array<float, dsp::SpectralProcessor::numFormants> maximums{};
+
+    for (size_t i = 0; i < values.size(); ++i)
+    {
+      if (auto *parameter = apvts.getParameter(formantParamId(i)))
+      {
+        minimums[i] = parameter->convertFrom0to1(0.0f);
+        maximums[i] = parameter->convertFrom0to1(1.0f);
+        values[i] = juce::jlimit(minimums[i], maximums[i], values[i]);
+      }
+    }
+
+    for (size_t i = 1; i < values.size(); ++i)
+      values[i] = std::max(values[i], values[i - 1] + 20.0f);
+
+    values.back() = std::min(values.back(), maximums.back());
+    for (size_t i = values.size() - 1; i-- > 0;)
+      values[i] = std::min(values[i], values[i + 1] - 20.0f);
+
+    for (size_t i = 0; i < values.size(); ++i)
+      values[i] = juce::jlimit(minimums[i], maximums[i], values[i]);
   }
 }
 
@@ -52,25 +112,25 @@ SpectralFormantMorpherAudioProcessor::SpectralFormantMorpherAudioProcessor()
                          .withInput("Input", juce::AudioChannelSet::stereo(), true)
                          .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       apvts(*this, nullptr, "Parameters", createParameterLayout())
+#else
+    : apvts(*this, nullptr, "Parameters", createParameterLayout())
 #endif
 {
-  formatManager.registerBasicFormats();
-
   for (size_t i = 0; i < dsp::SpectralProcessor::numFormants; ++i)
-    apvts.addParameterListener(formantParamId(i), this);
+    formantParameterValues[i] = apvts.getRawParameterValue(formantParamId(i));
 
-  apvts.addParameterListener("MIX", this);
-  apvts.addParameterListener("OUTPUT_GAIN", this);
+  mixParameterValue = apvts.getRawParameterValue("MIX");
+  outputGainParameterValue = apvts.getRawParameterValue("OUTPUT_GAIN");
+
+  jassert(std::all_of(formantParameterValues.begin(), formantParameterValues.end(), [](const auto *value)
+                      { return value != nullptr; }));
+  jassert(mixParameterValue != nullptr);
+  jassert(outputGainParameterValue != nullptr);
+
+  setLatencySamples(dsp::SpectralProcessor::getLatencySamples());
 }
 
-SpectralFormantMorpherAudioProcessor::~SpectralFormantMorpherAudioProcessor()
-{
-  for (size_t i = 0; i < dsp::SpectralProcessor::numFormants; ++i)
-    apvts.removeParameterListener(formantParamId(i), this);
-
-  apvts.removeParameterListener("MIX", this);
-  apvts.removeParameterListener("OUTPUT_GAIN", this);
-}
+SpectralFormantMorpherAudioProcessor::~SpectralFormantMorpherAudioProcessor() = default;
 
 juce::AudioProcessorValueTreeState::ParameterLayout SpectralFormantMorpherAudioProcessor::createParameterLayout()
 {
@@ -120,32 +180,60 @@ std::array<float, dsp::SpectralProcessor::numFormants> SpectralFormantMorpherAud
 
   for (size_t i = 0; i < formants.size(); ++i)
   {
-    if (const auto *param = apvts.getRawParameterValue(formantParamId(i)))
-      formants[i] = param->load();
+    if (const auto *param = formantParameterValues[i])
+      formants[i] = param->load(std::memory_order_relaxed);
   }
 
   return formants;
 }
 
-bool SpectralFormantMorpherAudioProcessor::analyzeSourceFileAndApplyFormants(const juce::File &sourceFile, juce::String &message)
+bool SpectralFormantMorpherAudioProcessor::analyzeSourceFile(
+    const juce::File &sourceFile,
+    std::array<float, dsp::SpectralProcessor::numFormants> &estimatedHz,
+    size_t &detectedFormantCount,
+    juce::String &message,
+    const std::function<bool()> &shouldCancel)
 {
-  if (!sourceFile.existsAsFile())
+  const auto wasCancelled = [&shouldCancel]
   {
-    message = "参照音源ファイルが見つかりません。";
+    return shouldCancel && shouldCancel();
+  };
+
+  detectedFormantCount = 0;
+
+  if (wasCancelled())
+  {
+    message = "Reference analysis cancelled.";
     return false;
   }
 
-  std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(sourceFile));
+  if (!sourceFile.existsAsFile())
+  {
+    message = "The reference audio file could not be found.";
+    return false;
+  }
+
+  juce::AudioFormatManager localFormatManager;
+  localFormatManager.registerBasicFormats();
+  std::unique_ptr<juce::AudioFormatReader> reader(localFormatManager.createReaderFor(sourceFile));
   if (reader == nullptr)
   {
-    message = "参照音源の読み込みに失敗しました。対応フォーマットを確認してください。";
+    message = "Could not read the reference audio. Try WAV, AIFF, FLAC, or Ogg.";
+    return false;
+  }
+
+  if (!std::isfinite(reader->sampleRate)
+      || reader->sampleRate <= 0.0
+      || reader->numChannels == 0)
+  {
+    message = "The reference audio has invalid stream information.";
     return false;
   }
 
   const juce::int64 maxReadSamples = std::min<juce::int64>((juce::int64)(reader->sampleRate * 6.0), reader->lengthInSamples);
   if (maxReadSamples <= 0)
   {
-    message = "参照音源に有効なサンプルがありません。";
+    message = "The reference audio contains no usable samples.";
     return false;
   }
 
@@ -153,10 +241,28 @@ bool SpectralFormantMorpherAudioProcessor::analyzeSourceFileAndApplyFormants(con
   juce::AudioBuffer<float> fileBuffer(channelsToRead, (int)maxReadSamples);
   fileBuffer.clear();
 
-  if (!reader->read(&fileBuffer, 0, (int)maxReadSamples, 0, true, channelsToRead > 1))
+  constexpr int decodeChunkSize = 32768;
+  for (int start = 0; start < (int)maxReadSamples; start += decodeChunkSize)
   {
-    message = "参照音源サンプルの読取に失敗しました。";
-    return false;
+    if (wasCancelled())
+    {
+      message = "Reference analysis cancelled.";
+      return false;
+    }
+
+    const int samplesToRead = std::min(
+        decodeChunkSize, (int)maxReadSamples - start);
+    if (!reader->read(
+            &fileBuffer,
+            start,
+            samplesToRead,
+            start,
+            true,
+            channelsToRead > 1))
+    {
+      message = "Could not decode samples from the reference audio.";
+      return false;
+    }
   }
 
   juce::AudioBuffer<float> monoBuffer(1, (int)maxReadSamples);
@@ -164,21 +270,45 @@ bool SpectralFormantMorpherAudioProcessor::analyzeSourceFileAndApplyFormants(con
 
   const float monoGain = 1.0f / (float)channelsToRead;
   for (int ch = 0; ch < channelsToRead; ++ch)
-    monoBuffer.addFrom(0, 0, fileBuffer, ch, 0, (int)maxReadSamples, monoGain);
-
-  auto estimated = spectralProcessor.estimateFormantsFromBuffer(monoBuffer, reader->sampleRate);
-
-  for (size_t i = 0; i < estimated.size(); ++i)
   {
-    if (auto *param = apvts.getParameter(formantParamId(i)))
+    if (wasCancelled())
     {
-      const float normalised = juce::jlimit(0.0f, 1.0f, param->convertTo0to1(estimated[i]));
-      param->setValueNotifyingHost(normalised);
+      message = "Reference analysis cancelled.";
+      return false;
     }
+
+    monoBuffer.addFrom(0, 0, fileBuffer, ch, 0, (int)maxReadSamples, monoGain);
   }
 
-  message = "参照音源からF1〜F15を推定して適用しました。";
+  dsp::SpectralProcessor referenceAnalyzer;
+  if (!referenceAnalyzer.estimateFormantsFromBuffer(
+          monoBuffer,
+          reader->sampleRate,
+          estimatedHz,
+          &detectedFormantCount,
+          shouldCancel))
+  {
+    message = wasCancelled()
+                  ? "Reference analysis cancelled."
+                  : "No reliable formant pattern was found. Try a clear, sustained vocal sample.";
+    return false;
+  }
+
+  message = "Reference analysis complete.";
   return true;
+}
+
+void SpectralFormantMorpherAudioProcessor::applyReferenceFormants(
+    const std::array<float, dsp::SpectralProcessor::numFormants> &estimatedHz,
+    size_t detectedFormantCount)
+{
+  auto normalised = collectTargetFormantsFromParameters();
+  const size_t valuesToApply = std::min(detectedFormantCount, normalised.size());
+  std::copy_n(estimatedHz.begin(), valuesToApply, normalised.begin());
+  normaliseFormantValues(apvts, normalised);
+
+  for (size_t i = 0; i < normalised.size(); ++i)
+    setParameterPlainValue(apvts, formantParamId(i), normalised[i]);
 }
 
 juce::String SpectralFormantMorpherAudioProcessor::createVoiceProfileJson() const
@@ -205,21 +335,31 @@ bool SpectralFormantMorpherAudioProcessor::applyVoiceProfileJson(const juce::Str
   const auto parseResult = juce::JSON::parse(jsonText, parsed);
   if (parseResult.failed())
   {
-    message = "プロファイルJSONの解析に失敗しました: " + parseResult.getErrorMessage();
+    message = "Could not parse the profile JSON: " + parseResult.getErrorMessage();
     return false;
   }
 
   auto *object = parsed.getDynamicObject();
   if (object == nullptr)
   {
-    message = "プロファイルはJSONオブジェクトである必要があります。";
+    message = "The profile must be a JSON object.";
     return false;
   }
 
   const auto type = object->getProperty("type").toString();
   if (type.isNotEmpty() && type != "SpectralFormantMorpherProfile")
   {
-    message = "このプラグイン用のプロファイルではありません。";
+    message = "This profile belongs to a different product.";
+    return false;
+  }
+
+  const auto versionValue = object->getProperty("version");
+  if (!versionValue.isVoid()
+      && ((!versionValue.isInt() && !versionValue.isInt64() && !versionValue.isDouble())
+          || !std::isfinite((double)versionValue)
+          || std::abs((double)versionValue - 1.0) > 1.0e-9))
+  {
+    message = "This profile version is not supported.";
     return false;
   }
 
@@ -227,19 +367,74 @@ bool SpectralFormantMorpherAudioProcessor::applyVoiceProfileJson(const juce::Str
   auto *formants = formantsVar.getArray();
   if (formants == nullptr || formants->size() < (int)dsp::SpectralProcessor::numFormants)
   {
-    message = "プロファイルにF1〜F15が含まれていません。";
+    message = "The profile must contain F1 through F15.";
     return false;
   }
 
+  std::array<float, dsp::SpectralProcessor::numFormants> validatedFormants{};
   for (size_t i = 0; i < dsp::SpectralProcessor::numFormants; ++i)
-    setParameterPlainValue(apvts, formantParamId(i), (float)(double)(*formants)[(int)i]);
+  {
+    const auto &value = (*formants)[(int)i];
+    if (!value.isInt() && !value.isInt64() && !value.isDouble())
+    {
+      message = "Every formant value must be a finite number.";
+      return false;
+    }
 
-  setParameterPlainValue(apvts, "MIX", getProfileNumber(*object, "mix", readParameterValue(apvts, "MIX", 100.0f)));
-  setParameterPlainValue(apvts, "OUTPUT_GAIN", getProfileNumber(*object, "outputGainDb", readParameterValue(apvts, "OUTPUT_GAIN", 0.0f)));
+    const float formant = (float)(double)value;
 
-  spectralProcessor.setTargetFormantsHz(collectTargetFormantsFromParameters());
-  message = "Voice Profileを適用しました。";
+    if (!isParameterValueInRange(apvts, formantParamId(i), formant))
+    {
+      message = "A formant value is outside the supported range.";
+      return false;
+    }
+
+    validatedFormants[i] = formant;
+  }
+
+  normaliseFormantValues(apvts, validatedFormants);
+
+  float validatedMix = 100.0f;
+  float validatedGain = 0.0f;
+  if (!getProfileNumber(*object, "mix", readParameterValue(apvts, "MIX", 100.0f), validatedMix)
+      || !getProfileNumber(*object, "outputGainDb", readParameterValue(apvts, "OUTPUT_GAIN", 0.0f), validatedGain)
+      || !isParameterValueInRange(apvts, "MIX", validatedMix)
+      || !isParameterValueInRange(apvts, "OUTPUT_GAIN", validatedGain))
+  {
+    message = "Mix or output gain is invalid.";
+    return false;
+  }
+
+  for (size_t i = 0; i < validatedFormants.size(); ++i)
+    setParameterPlainValue(apvts, formantParamId(i), validatedFormants[i]);
+
+  setParameterPlainValue(apvts, "MIX", validatedMix);
+  setParameterPlainValue(apvts, "OUTPUT_GAIN", validatedGain);
+
+  message = "Voice Profile applied.";
   return true;
+}
+
+void SpectralFormantMorpherAudioProcessor::normaliseFormantParameters()
+{
+  if (isNormalisingFormants)
+    return;
+
+  const juce::ScopedValueSetter<bool> guard(isNormalisingFormants, true);
+  auto values = collectTargetFormantsFromParameters();
+  normaliseFormantValues(apvts, values);
+
+  for (size_t i = 0; i < values.size(); ++i)
+  {
+    if (auto *parameter = apvts.getParameter(formantParamId(i)))
+    {
+      const float current = formantParameterValues[i] != nullptr
+                                ? formantParameterValues[i]->load(std::memory_order_relaxed)
+                                : values[i];
+      if (std::abs(current - values[i]) > 0.5f)
+        parameter->setValueNotifyingHost(parameter->convertTo0to1(values[i]));
+    }
+  }
 }
 
 const juce::String SpectralFormantMorpherAudioProcessor::getName() const
@@ -315,11 +510,31 @@ void SpectralFormantMorpherAudioProcessor::prepareToPlay(double sampleRate, int 
   spectralProcessor.prepare(spec);
   spectralProcessor.setTargetFormantsHz(collectTargetFormantsFromParameters());
 
-  dryBuffer.setSize(getTotalNumOutputChannels(), samplesPerBlock);
+  dryDelayLine.prepare(spec);
+  dryDelayLine.setDelay((float)dsp::SpectralProcessor::getLatencySamples());
+  dryDelayLine.reset();
+
+  const float initialMix = mixParameterValue != nullptr
+                               ? juce::jlimit(0.0f, 1.0f, mixParameterValue->load(std::memory_order_relaxed) / 100.0f)
+                               : 1.0f;
+  const float initialGain = juce::Decibels::decibelsToGain(
+      outputGainParameterValue != nullptr
+          ? outputGainParameterValue->load(std::memory_order_relaxed)
+          : 0.0f);
+
+  mixSmoother.reset(sampleRate, 0.02);
+  mixSmoother.setCurrentAndTargetValue(initialMix);
+  outputGainSmoother.reset(sampleRate, 0.02);
+  outputGainSmoother.setCurrentAndTargetValue(initialGain);
+
+  dryBuffer.setSize(getTotalNumOutputChannels(), samplesPerBlock, false, false, true);
+  setLatencySamples(dsp::SpectralProcessor::getLatencySamples());
 }
 
 void SpectralFormantMorpherAudioProcessor::releaseResources()
 {
+  spectralProcessor.reset();
+  dryDelayLine.reset();
 }
 
 #ifndef JucePlugin_PreferredChannelConfigurations
@@ -355,12 +570,20 @@ void SpectralFormantMorpherAudioProcessor::processBlock(juce::AudioBuffer<float>
 
   spectralProcessor.setTargetFormantsHz(collectTargetFormantsFromParameters());
 
-  // Save dry signal for mix
-  const float mix = apvts.getRawParameterValue("MIX")->load() / 100.0f;
-  const float outputGainDb = apvts.getRawParameterValue("OUTPUT_GAIN")->load();
-  const float outputGain = juce::Decibels::decibelsToGain(outputGainDb);
+  const float mixTarget = mixParameterValue != nullptr
+                              ? juce::jlimit(0.0f, 1.0f, mixParameterValue->load(std::memory_order_relaxed) / 100.0f)
+                              : 1.0f;
+  const float outputGainTarget = juce::Decibels::decibelsToGain(
+      outputGainParameterValue != nullptr
+          ? outputGainParameterValue->load(std::memory_order_relaxed)
+          : 0.0f);
+  mixSmoother.setTargetValue(mixTarget);
+  outputGainSmoother.setTargetValue(outputGainTarget);
 
   dryBuffer.makeCopyOf(buffer, true);
+  juce::dsp::AudioBlock<float> dryBlock(dryBuffer);
+  juce::dsp::ProcessContextReplacing<float> dryContext(dryBlock);
+  dryDelayLine.process(dryContext);
 
   // Process wet signal
   juce::dsp::AudioBlock<float> block(buffer);
@@ -369,14 +592,15 @@ void SpectralFormantMorpherAudioProcessor::processBlock(juce::AudioBuffer<float>
 
   // Apply dry/wet mix and output gain
   const int numSamples = buffer.getNumSamples();
-  for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+  for (int i = 0; i < numSamples; ++i)
   {
-    auto *wet = buffer.getWritePointer(ch);
-    const auto *dry = dryBuffer.getReadPointer(ch);
+    const float mix = mixSmoother.getNextValue();
+    const float outputGain = outputGainSmoother.getNextValue();
 
-    for (int i = 0; i < numSamples; ++i)
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
     {
-      // Mix: 0 = dry, 1 = wet
+      auto *wet = buffer.getWritePointer(ch);
+      const auto *dry = dryBuffer.getReadPointer(ch);
       float sample = dry[i] * (1.0f - mix) + wet[i] * mix;
 
       sample *= outputGain;
@@ -387,6 +611,35 @@ void SpectralFormantMorpherAudioProcessor::processBlock(juce::AudioBuffer<float>
       wet[i] = sample;
     }
   }
+}
+
+void SpectralFormantMorpherAudioProcessor::processBlockBypassed(
+    juce::AudioBuffer<float> &buffer,
+    juce::MidiBuffer &midiMessages)
+{
+  juce::ignoreUnused(midiMessages);
+  juce::ScopedNoDenormals noDenormals;
+
+  const int totalNumInputChannels = getTotalNumInputChannels();
+  const int totalNumOutputChannels = getTotalNumOutputChannels();
+
+  for (int channel = totalNumInputChannels; channel < totalNumOutputChannels; ++channel)
+    buffer.clear(channel, 0, buffer.getNumSamples());
+
+  dryBuffer.makeCopyOf(buffer, true);
+  juce::dsp::AudioBlock<float> dryBlock(dryBuffer);
+  juce::dsp::ProcessContextReplacing<float> dryContext(dryBlock);
+  dryDelayLine.process(dryContext);
+
+  // Keep the wet STFT history moving while bypassed so toggling bypass does not
+  // replay stale overlap-add data.
+  spectralProcessor.setTargetFormantsHz(collectTargetFormantsFromParameters());
+  juce::dsp::AudioBlock<float> wetStateBlock(buffer);
+  juce::dsp::ProcessContextReplacing<float> wetStateContext(wetStateBlock);
+  spectralProcessor.process(wetStateContext);
+
+  for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+    buffer.copyFrom(channel, 0, dryBuffer, channel, 0, buffer.getNumSamples());
 }
 
 bool SpectralFormantMorpherAudioProcessor::hasEditor() const
@@ -412,11 +665,6 @@ void SpectralFormantMorpherAudioProcessor::setStateInformation(const void *data,
   if (xmlState.get() != nullptr)
     if (xmlState->hasTagName(apvts.state.getType()))
       apvts.replaceState(juce::ValueTree::fromXml(*xmlState));
-}
-
-void SpectralFormantMorpherAudioProcessor::parameterChanged(const juce::String &parameterID, float newValue)
-{
-  juce::ignoreUnused(parameterID, newValue);
 }
 
 juce::AudioProcessor *JUCE_CALLTYPE createPluginFilter()

@@ -33,6 +33,11 @@ class FormantWarper
 public:
     FormantWarper() = default;
 
+    void prepare(int numBins)
+    {
+        warpMap.assign((size_t)std::max(0, numBins), 0.0f);
+    }
+
     /**
      * Prepares the warp map based on a list of control points.
      *
@@ -108,6 +113,9 @@ public:
         jassert(warpMap.size() == srcEnvelope.size());
 
         size_t size = srcEnvelope.size();
+        if (size == 0 || dstEnvelope.size() != size || warpMap.size() != size)
+            return;
+
         size_t maxIdx = size - 1;
 
         for (size_t i = 0; i < size; ++i)

@@ -3,6 +3,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_dsp/juce_dsp.h>
 #include <array>
+#include <functional>
 #include "EnvelopeExtractor.h"
 #include "FormantWarper.h"
 
@@ -31,9 +32,15 @@ namespace dsp
         void process(const juce::dsp::ProcessContextReplacing<float> &context);
         void reset();
 
+        static constexpr int getLatencySamples() noexcept { return fftSize; }
+
         void setTargetFormantsHz(const std::array<float, numFormants> &targetHz);
 
-        std::array<float, numFormants> estimateFormantsFromBuffer(const juce::AudioBuffer<float> &sourceBuffer, double sourceSampleRate);
+        bool estimateFormantsFromBuffer(const juce::AudioBuffer<float> &sourceBuffer,
+                                        double sourceSampleRate,
+                                        std::array<float, numFormants> &estimatedHz,
+                                        size_t *detectedFormantCount = nullptr,
+                                        const std::function<bool()> &shouldCancel = {}) const;
 
         /**
          * Retrieves the latest spectral data for the GUI.
@@ -47,7 +54,9 @@ namespace dsp
          */
         void processFrame(std::vector<float> &data, bool updateVisualization);
 
-        void detectFormants(const std::vector<float> &envelope, double sampleRate, std::array<float, numFormants> &formantBins) const;
+        size_t detectFormants(const std::vector<float> &envelope,
+                              double sampleRate,
+                              std::array<float, numFormants> &formantBins) const;
 
         static constexpr int fftOrder = 10; // 1024 samples
         static constexpr int fftSize = 1 << fftOrder;
@@ -99,8 +108,8 @@ namespace dsp
         float visF1 = 0.0f;
         float visF2 = 0.0f;
 
-        // Normalization: JUCE IFFT multiplies by N, and Hann^2 overlap-add with 75% overlap = 1.5
-        // Total gain = N * 1.5, so we normalize by 1 / (N * 1.5) = 2 / (3N)
+        // JUCE's IFFT is already normalised. Hann^2 overlap-add with 75%
+        // overlap sums to 1.5, so synthesis only needs a 1 / 1.5 factor.
         static constexpr float overlapAddSum = 1.5f;
 
         // Maximum gain ratio allowed for envelope warping (prevents extreme amplification)

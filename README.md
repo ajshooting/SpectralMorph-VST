@@ -1,67 +1,112 @@
-# SpectralFormantMorpher
+# Spectral Formant Morpher
 
-A real-time VST3/AU audio plugin for vocal timbre morphing with direct control of `F1〜F15` formants while preserving pitch.
+Spectral Formant Morpher is a real-time VST3/AU/Standalone audio effect for reshaping vocal timbre. It detects the input spectral envelope and warps its formant peaks toward user-controlled F1-F15 targets while leaving the harmonic spacing—and therefore the perceived pitch—unchanged.
+
+This is a spectral-envelope processor, not a neural voice-conversion or pitch-shifting system. A Voice Profile is a lightweight formant recipe rather than a learned speaker identity.
 
 ## Features
 
-- **F1/F2 XY Pad:** Move one point in XY space to control `F1` (Y axis) and `F2` (X axis) in Hz.
-- **F3〜F15 Mixer-style Sliders:** Each higher formant can be controlled independently with vertical sliders.
-- **Reference Audio Import:** Load a reference file (`wav/aiff/flac/mp3`) and auto-estimate/apply `F1〜F15` as the target template.
-- **Voice Profile Sharing:** Copy/paste or export/import `F1〜F15`, mix, and output gain as a JSON `.sfmprofile`.
-- **Real-time Morphing:** During playback, the current input envelope is warped toward the configured `F1〜F15` targets.
-- **Real-time Visualization:** Spectrum + warped envelope preview while processing.
+- **F1/F2 target pad** with mouse and keyboard control
+- **Independent F3-F15 faders** with a monotonic DSP mapping
+- **Reference audio analysis** from WAV, AIFF, FLAC, or Ogg files
+- **Voice Profile sharing** through clipboard JSON or `.sfmprofile` files
+- **Latency-aligned dry/wet mix** and smoothed output gain
+- **Live logarithmic analyzer** for the input spectrum and morphed envelope
+- **Resizable, accessible dark UI** with named controls and keyboard focus states
 
-## Technical Details
+## Signal flow
 
-The plugin is built with **JUCE 8.0.12** and **C++20**.
+1. A 1024-sample Hann-windowed STFT runs at 75% overlap.
+2. Cepstral liftering extracts a smooth spectral envelope.
+3. Up to 15 envelope peaks are detected as the current formants.
+4. A monotonic piecewise-linear map moves those peaks toward F1-F15.
+5. The warped envelope is applied to the original spectral fine structure.
+6. Inverse STFT and overlap-add reconstruct the signal.
 
-### DSP Pipeline
+The wet path has a fixed latency of 1024 samples. The plugin reports this latency to the host and delays the dry path by the same amount, so intermediate dry/wet settings remain phase-aligned.
 
-1.  **STFT Analysis:** The input signal is windowed (Hann) and transformed using FFT (1024 samples, 75% overlap).
-2.  **Envelope Extraction:**
-    - Log Magnitude Spectrum -> Inverse FFT -> Cepstrum.
-    - Liftering (low-pass) to extract the smooth envelope.
-    - Forward FFT -> Exponentiation to get the Linear Envelope.
-3.  **Formant Detection:** Detect up to 15 envelope peaks as the current input formants.
-4.  **Warping:** Build a piecewise-linear mapping from detected formants to target `F1〜F15` bins.
-5.  **Resynthesis:** Apply the warped envelope to the input spectral fine structure.
-6.  **Reconstruction:** Inverse FFT and overlap-add synthesis.
+## Reference audio and Voice Profiles
 
-## Build Instructions
+`Analyze reference` reads up to the first six seconds of a file on a background thread. It combines as many as eight energetic, non-overlapping analysis frames in the log-envelope domain, rejects silence, isolated transients, and low-confidence results, then applies only the envelope peaks that were actually detected. Higher targets are left unchanged instead of being replaced with synthetic estimates. Clear, sustained vocal audio gives the most useful result.
 
-### Prerequisites
+A Voice Profile contains:
 
-- **CMake** (3.20+)
-- **C++ Compiler** supporting C++20 (GCC 10+, Clang 10+, MSVC 2019+)
-- **Linux Dependencies** (Ubuntu/Debian):
-  ```bash
-  sudo apt-get install libasound2-dev libjack-jackd2-dev ladspa-sdk \
-      libcurl4-openssl-dev libfreetype-dev libx11-dev libxcomposite-dev \
-      libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev libxrender-dev \
-      libwebkit2gtk-4.1-dev libgtk-3-dev
-  ```
+- F1-F15 target frequencies
+- dry/wet mix
+- output gain
+- a format type and version
 
-### Compilation
+Imported values are validated before any parameter is changed. Crossing formants are corrected into ascending order so the saved/UI values match the DSP target.
+
+## Build
+
+### Requirements
+
+- CMake 3.20 or newer
+- A C++20 compiler
+- Git, used by CMake to fetch JUCE 8.0.12
+
+Ubuntu/Debian packages:
 
 ```bash
-# Configure
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+sudo apt-get install libasound2-dev libjack-jackd2-dev ladspa-sdk \
+    libcurl4-openssl-dev libfreetype-dev pkg-config \
+    libx11-dev libxcomposite-dev libxcursor-dev libxext-dev \
+    libxinerama-dev libxrandr-dev libxrender-dev \
+    libwebkit2gtk-4.1-dev libgtk-3-dev \
+    libglu1-mesa-dev mesa-common-dev
+```
 
-# Build
+Configure and build:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
-The compiled plugin will be located in `build/SpectralFormantMorpher_artefacts/Release/`.
+Artifacts are written under:
 
-## Testing
-
-Unit tests for the warping logic are included.
-
-```bash
-# Run tests
-./build/Runner_artefacts/Release/Runner
+```text
+build/SpectralFormantMorpher_artefacts/Release/
 ```
 
-## CI/CD
+The default build does not copy plugins into system plugin folders. For a local development build that should install the result automatically:
 
-Automated builds for Ubuntu, macOS, and Windows are handled via GitHub Actions (`.github/workflows/build.yml`).
+```bash
+cmake -S . -B build -DSFM_COPY_PLUGIN_AFTER_BUILD=ON
+```
+
+The default macOS deployment target is macOS 11.0 and can be overridden with `CMAKE_OSX_DEPLOYMENT_TARGET`. Local builds use the host architecture by default; CI packages macOS artifacts as Universal 2 (`arm64` and `x86_64`). Local and CI artifacts are not Developer ID signed or notarized.
+
+## Tests
+
+```bash
+ctest --test-dir build -C Release --output-on-failure
+```
+
+The regression runner covers:
+
+- empty and explicit identity warp maps
+- piecewise formant mapping
+- cepstral-envelope gain preservation
+- JUCE FFT round-trip normalization
+- STFT impulse gain and exact latency
+- stereo channel isolation
+- silent-reference rejection
+- isolated-transient reference rejection
+- sustained formant-shaped reference acceptance
+- cooperative reference-analysis cancellation
+- low-sample-rate finite-output safety
+- actual processor bypass/dry-path latency alignment across mode changes
+
+## CI and releases
+
+`.github/workflows/build.yml` builds and tests Ubuntu, macOS, and Windows on every push and pull request.
+
+Tags must match the version in `CMakeLists.txt` (for example, project version `0.1.0` requires tag `v0.1.0`). The release workflow publishes native artifacts only after all three platform builds and the regression suite succeed.
+
+Platform outputs:
+
+- macOS: VST3, AU, Standalone
+- Windows: VST3, Standalone
+- Linux: VST3, Standalone

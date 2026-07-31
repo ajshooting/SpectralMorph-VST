@@ -1,15 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 
+set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS deployment version")
+
 project(SpectralFormantMorpher VERSION 0.1.0)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-option(SFM_COPY_PLUGIN_AFTER_BUILD "Copy built plugins to the system plugin folders after building" ON)
-
-if(APPLE)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS deployment version" FORCE)
-endif()
+option(SFM_COPY_PLUGIN_AFTER_BUILD "Copy built plugins to the system plugin folders after building" OFF)
 
 # -----------------------------------------------------------------------------
 # JUCE Dependency
@@ -97,25 +95,32 @@ endif()
 # -----------------------------------------------------------------------------
 enable_testing()
 
-juce_add_console_app(Runner
-    PRODUCT_NAME "UnitTests"
-)
+add_executable(Runner)
 
 target_sources(Runner
     PRIVATE
         Tests/WarpingTest.cpp
-        Source/DSP/FormantWarper.h
 )
 
 target_link_libraries(Runner
     PRIVATE
-        juce::juce_core
+        SpectralFormantMorpher
+        juce::juce_audio_processors
         juce::juce_dsp
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(CURL REQUIRED)
     target_link_libraries(Runner PRIVATE CURL::libcurl)
+
+    if(GTK3_FOUND)
+        target_include_directories(Runner PRIVATE ${GTK3_INCLUDE_DIRS})
+        target_link_libraries(Runner PRIVATE ${GTK3_LIBRARIES})
+    endif()
+    if(WEBKIT_FOUND)
+        target_include_directories(Runner PRIVATE ${WEBKIT_INCLUDE_DIRS})
+        target_link_libraries(Runner PRIVATE ${WEBKIT_LIBRARIES})
+    endif()
 endif()
 
-add_test(NAME WarpingLogicTest COMMAND Runner)
+add_test(NAME DspRegressionTest COMMAND Runner)

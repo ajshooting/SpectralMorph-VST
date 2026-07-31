@@ -10,7 +10,10 @@ namespace dsp
   SpectralProcessor::SpectralProcessor()
   {
     fft = std::make_unique<juce::dsp::FFT>(fftOrder);
-    window = std::make_unique<juce::dsp::WindowingFunction<float>>(fftSize, juce::dsp::WindowingFunction<float>::hann);
+    window = std::make_unique<juce::dsp::WindowingFunction<float>>(
+        fftSize,
+        juce::dsp::WindowingFunction<float>::hann,
+        false);
 
     fftBuffer.resize(fftSize * 2, 0.0f);
     warpPoints.reserve(numFormants + 2);
@@ -22,6 +25,7 @@ namespace dsp
 
     visSpectrum.resize((size_t)numBins);
     visEnvelope.resize((size_t)numBins);
+    formantWarper.prepare(numBins);
   }
 
   SpectralProcessor::~SpectralProcessor() = default;
@@ -69,18 +73,35 @@ namespace dsp
     for (size_t i = 0; i < targetFormantsHz.size(); ++i)
     {
       const float minHz = (i == 0) ? 200.0f : targetFormantsHz[i - 1] + 20.0f;
+      if (!std::isfinite(targetFormantsHz[i]))
+        targetFormantsHz[i] = minHz;
+
       targetFormantsHz[i] = std::max(minHz, targetFormantsHz[i]);
     }
   }
 
-  void SpectralProcessor::detectFormants(const std::vector<float> &envelope,
-                                         double sampleRate,
-                                         std::array<float, numFormants> &formantBins) const
+  size_t SpectralProcessor::detectFormants(const std::vector<float> &envelope,
+                                           double sampleRate,
+                                           std::array<float, numFormants> &formantBins) const
   {
+    if (envelope.size() < 3
+        || !std::isfinite(sampleRate)
+        || sampleRate <= 0.0)
+    {
+      formantBins.fill(0.0f);
+      return 0;
+    }
+
     const float hzPerBin = (float)sampleRate / (float)fftSize;
     const int minBin = std::max(1, (int)(150.0f / hzPerBin));
     const int maxBin = std::min((int)envelope.size() - 2, (int)(9000.0f / hzPerBin));
     const int minDistanceBins = std::max(2, (int)(120.0f / hzPerBin));
+    if (minBin > maxBin)
+    {
+      formantBins.fill((float)juce::jlimit(
+          0, (int)envelope.size() - 1, minBin));
+      return 0;
+    }
 
     struct Peak
     {
@@ -88,27 +109,29 @@ namespace dsp
       float mag = 0.0f;
     };
 
-    std::vector<Peak> candidates;
-    candidates.reserve((size_t)std::max(0, maxBin - minBin + 1));
+    std::array<Peak, fftSize / 2 + 1> candidates{};
+    size_t candidateCount = 0;
 
     for (int i = minBin; i <= maxBin; ++i)
     {
       const float v = envelope[(size_t)i];
       if (v > envelope[(size_t)i - 1] && v >= envelope[(size_t)i + 1])
-        candidates.push_back({i, v});
+        candidates[candidateCount++] = {i, v};
     }
 
-    std::sort(candidates.begin(), candidates.end(), [](const Peak &a, const Peak &b)
+    std::sort(candidates.begin(), candidates.begin() + (std::ptrdiff_t)candidateCount, [](const Peak &a, const Peak &b)
               { return a.mag > b.mag; });
 
-    std::vector<int> selected;
-    selected.reserve(numFormants);
+    std::array<int, numFormants> selected{};
+    size_t selectedCount = 0;
 
-    for (const auto &peak : candidates)
+    for (size_t candidateIndex = 0; candidateIndex < candidateCount; ++candidateIndex)
     {
+      const auto &peak = candidates[candidateIndex];
       bool tooClose = false;
-      for (int chosen : selected)
+      for (size_t selectedIndex = 0; selectedIndex < selectedCount; ++selectedIndex)
       {
+        const int chosen = selected[selectedIndex];
         if (std::abs(chosen - peak.bin) < minDistanceBins)
         {
           tooClose = true;
@@ -117,18 +140,18 @@ namespace dsp
       }
 
       if (!tooClose)
-        selected.push_back(peak.bin);
+        selected[selectedCount++] = peak.bin;
 
-      if (selected.size() >= numFormants)
+      if (selectedCount >= numFormants)
         break;
     }
 
-    std::sort(selected.begin(), selected.end());
+    std::sort(selected.begin(), selected.begin() + (std::ptrdiff_t)selectedCount);
 
     int lastBin = std::max(minBin, 1);
     for (size_t i = 0; i < numFormants; ++i)
     {
-      if (i < selected.size())
+      if (i < selectedCount)
       {
         lastBin = std::max(lastBin + (i == 0 ? 0 : minDistanceBins / 2), selected[i]);
       }
@@ -139,21 +162,41 @@ namespace dsp
 
       formantBins[i] = (float)juce::jlimit(minBin, maxBin, lastBin);
     }
+
+    return selectedCount;
   }
 
-  std::array<float, SpectralProcessor::numFormants> SpectralProcessor::estimateFormantsFromBuffer(const juce::AudioBuffer<float> &sourceBuffer,
-                                                                                                  double sourceSampleRate)
+  bool SpectralProcessor::estimateFormantsFromBuffer(const juce::AudioBuffer<float> &sourceBuffer,
+                                                      double sourceSampleRate,
+                                                      std::array<float, numFormants> &estimatedHz,
+                                                      size_t *detectedFormantCount,
+                                                      const std::function<bool()> &shouldCancel) const
   {
-    std::array<float, numFormants> estimatedHz{
+    const auto wasCancelled = [&shouldCancel]
+    {
+      return shouldCancel && shouldCancel();
+    };
+
+    if (detectedFormantCount != nullptr)
+      *detectedFormantCount = 0;
+
+    estimatedHz = {
         500.0f, 1500.0f, 2500.0f, 3200.0f, 3800.0f,
         4400.0f, 5000.0f, 5600.0f, 6200.0f, 6800.0f,
         7400.0f, 8000.0f, 8600.0f, 9200.0f, 9800.0f};
 
-    if (sourceBuffer.getNumSamples() <= 0 || sourceBuffer.getNumChannels() <= 0)
-      return estimatedHz;
+    if (sourceBuffer.getNumSamples() <= 0
+        || sourceBuffer.getNumChannels() <= 0
+        || !std::isfinite(sourceSampleRate)
+        || sourceSampleRate <= 0.0
+        || wasCancelled())
+      return false;
 
     juce::dsp::FFT analysisFft(fftOrder);
-    juce::dsp::WindowingFunction<float> analysisWindow(fftSize, juce::dsp::WindowingFunction<float>::hann);
+    juce::dsp::WindowingFunction<float> analysisWindow(
+        fftSize,
+        juce::dsp::WindowingFunction<float>::hann,
+        false);
     EnvelopeExtractor analysisEnvelopeExtractor;
     analysisEnvelopeExtractor.prepare(fftSize);
 
@@ -162,37 +205,154 @@ namespace dsp
     std::vector<float> analysisFftBuffer((size_t)fftSize * 2, 0.0f);
     std::vector<float> analysisMagnitude((size_t)numBins, 0.0f);
     std::vector<float> analysisEnvelope((size_t)numBins, 0.0f);
+    std::vector<double> accumulatedLogEnvelope((size_t)numBins, 0.0);
 
     const int totalSamples = sourceBuffer.getNumSamples();
-    const int start = std::max(0, (totalSamples / 2) - (fftSize / 2));
-    const int copyCount = std::min(fftSize, totalSamples - start);
-
     const float *readPtr = sourceBuffer.getReadPointer(0);
-    std::copy(readPtr + start, readPtr + start + copyCount, frame.begin());
 
-    analysisWindow.multiplyWithWindowingTable(frame.data(), fftSize);
-
-    std::copy(frame.begin(), frame.end(), analysisFftBuffer.begin());
-
-    analysisFft.performRealOnlyForwardTransform(analysisFftBuffer.data());
-
-    for (int i = 0; i < numBins; ++i)
+    struct RankedFrame
     {
-      const float real = analysisFftBuffer[(size_t)i * 2];
-      const float imag = analysisFftBuffer[(size_t)i * 2 + 1];
-      analysisMagnitude[(size_t)i] = std::sqrt(real * real + imag * imag);
+      double meanSquare = 0.0;
+      int start = 0;
+    };
+
+    constexpr size_t maxRankedCandidates = 64;
+    constexpr size_t maxAnalysisFrames = 8;
+    std::array<RankedFrame, maxRankedCandidates> strongestFrames{};
+    size_t strongestFrameCount = 0;
+    const int scanStep = std::max(hopSize, totalSamples / 256);
+    const int lastStart = std::max(0, totalSamples - fftSize);
+
+    for (int start = 0;; start = std::min(lastStart, start + scanStep))
+    {
+      if (wasCancelled())
+        return false;
+
+      const int copyCount = std::min(fftSize, totalSamples - start);
+      double sumSquares = 0.0;
+      for (int i = 0; i < copyCount; ++i)
+      {
+        const double sample = readPtr[start + i];
+        sumSquares += sample * sample;
+      }
+
+      const double meanSquare = sumSquares / (double)copyCount;
+      if (strongestFrameCount < strongestFrames.size())
+      {
+        strongestFrames[strongestFrameCount++] = {meanSquare, start};
+        std::sort(strongestFrames.begin(),
+                  strongestFrames.begin() + (std::ptrdiff_t)strongestFrameCount,
+                  [](const RankedFrame &a, const RankedFrame &b)
+                  {
+                    return a.meanSquare > b.meanSquare;
+                  });
+      }
+      else if (meanSquare > strongestFrames.back().meanSquare)
+      {
+        strongestFrames.back() = {meanSquare, start};
+        std::sort(strongestFrames.begin(),
+                  strongestFrames.end(),
+                  [](const RankedFrame &a, const RankedFrame &b)
+                  {
+                    return a.meanSquare > b.meanSquare;
+                  });
+      }
+
+      if (start == lastStart)
+        break;
     }
 
-    analysisEnvelopeExtractor.process(analysisMagnitude, analysisEnvelope);
+    if (strongestFrameCount == 0
+        || std::sqrt(strongestFrames.front().meanSquare) < 1.0e-5)
+      return false;
+
+    // Average several energetic windows in the log-envelope domain. This is
+    // less likely than a single loud frame to lock onto a plosive or click.
+    const double minimumMeanSquare = strongestFrames.front().meanSquare * 0.04;
+    size_t aggregatedFrameCount = 0;
+    std::array<int, maxAnalysisFrames> aggregatedFrameStarts{};
+    for (size_t frameIndex = 0; frameIndex < strongestFrameCount; ++frameIndex)
+    {
+      if (wasCancelled())
+        return false;
+
+      const auto &ranked = strongestFrames[frameIndex];
+      if (ranked.meanSquare < minimumMeanSquare)
+        break;
+
+      const bool overlapsSelectedFrame = std::any_of(
+          aggregatedFrameStarts.begin(),
+          aggregatedFrameStarts.begin() + (std::ptrdiff_t)aggregatedFrameCount,
+          [&ranked](int selectedStart)
+          {
+            return std::abs(selectedStart - ranked.start) < fftSize;
+          });
+      if (overlapsSelectedFrame)
+        continue;
+
+      std::fill(frame.begin(), frame.end(), 0.0f);
+      std::fill(analysisFftBuffer.begin(), analysisFftBuffer.end(), 0.0f);
+
+      const int copyCount = std::min(fftSize, totalSamples - ranked.start);
+      std::copy(readPtr + ranked.start,
+                readPtr + ranked.start + copyCount,
+                frame.begin());
+
+      analysisWindow.multiplyWithWindowingTable(frame.data(), fftSize);
+      std::copy(frame.begin(), frame.end(), analysisFftBuffer.begin());
+      analysisFft.performRealOnlyForwardTransform(analysisFftBuffer.data());
+
+      for (int i = 0; i < numBins; ++i)
+      {
+        const float real = analysisFftBuffer[(size_t)i * 2];
+        const float imag = analysisFftBuffer[(size_t)i * 2 + 1];
+        analysisMagnitude[(size_t)i] = std::sqrt(real * real + imag * imag);
+      }
+
+      analysisEnvelopeExtractor.process(analysisMagnitude, analysisEnvelope);
+      for (int i = 0; i < numBins; ++i)
+        accumulatedLogEnvelope[(size_t)i] +=
+            std::log((double)std::max(analysisEnvelope[(size_t)i], 1.0e-9f));
+
+      aggregatedFrameStarts[aggregatedFrameCount++] = ranked.start;
+      if (aggregatedFrameCount == maxAnalysisFrames)
+        break;
+    }
+
+    const size_t minimumFrameCount = totalSamples >= fftSize * 3
+                                         ? 3u
+                                         : (totalSamples >= fftSize + hopSize ? 2u : 1u);
+    if (aggregatedFrameCount < minimumFrameCount)
+      return false;
+
+    for (int i = 0; i < numBins; ++i)
+      analysisEnvelope[(size_t)i] =
+          (float)std::exp(accumulatedLogEnvelope[(size_t)i]
+                          / (double)aggregatedFrameCount);
 
     std::array<float, numFormants> bins{};
-    detectFormants(analysisEnvelope, sourceSampleRate, bins);
+    const auto detectedCount = detectFormants(analysisEnvelope, sourceSampleRate, bins);
+    if (detectedCount < 3)
+      return false;
 
     const float hzPerBin = (float)sourceSampleRate / (float)fftSize;
+    const int firstAnalysisBin = juce::jlimit(
+        0, numBins - 1, (int)std::ceil(150.0f / hzPerBin));
+    const int lastAnalysisBin = juce::jlimit(
+        firstAnalysisBin, numBins - 1, (int)std::floor(9000.0f / hzPerBin));
+    const auto envelopeRange = std::minmax_element(
+        analysisEnvelope.begin() + firstAnalysisBin,
+        analysisEnvelope.begin() + lastAnalysisBin + 1);
+    if (*envelopeRange.second < *envelopeRange.first * 1.6f)
+      return false;
+
+    if (detectedFormantCount != nullptr)
+      *detectedFormantCount = detectedCount;
+
     for (size_t i = 0; i < numFormants; ++i)
       estimatedHz[i] = bins[i] * hzPerBin;
 
-    return estimatedHz;
+    return true;
   }
 
   void SpectralProcessor::processFrame(std::vector<float> &data, bool updateVisualization)
@@ -228,7 +388,10 @@ namespace dsp
     {
       const float src = currentFormantBins[i];
       const float targetBin = targetFormantsHz[i] / std::max(1.0f, hzPerBin);
-      const float dst = juce::jlimit(lastDst + 1.0f, (float)(numBins - 2), targetBin);
+      const float minimumDst = lastDst + 1.0f;
+      const float remainingPoints = (float)(numFormants - i - 1);
+      const float maximumDst = (float)(numBins - 2) - remainingPoints;
+      const float dst = juce::jlimit(minimumDst, maximumDst, targetBin);
       warpPoints.push_back({src, dst});
       lastDst = dst;
     }
@@ -241,8 +404,14 @@ namespace dsp
     // --- Visualization data (lock-free tryEnter) ---
     if (updateVisualization && visualizationLock.tryEnter())
     {
-      visSpectrum = magnitudeSpectrum;
-      visEnvelope = warpedEnvelope;
+      // A non-normalised Hann window has a coherent gain of 0.5, so a
+      // bin-centred full-scale sinusoid needs 4 / N to display near 0 dBFS.
+      constexpr float displayNormalisation = 4.0f / (float)fftSize;
+      for (int i = 0; i < numBins; ++i)
+      {
+        visSpectrum[(size_t)i] = magnitudeSpectrum[(size_t)i] * displayNormalisation;
+        visEnvelope[(size_t)i] = warpedEnvelope[(size_t)i] * displayNormalisation;
+      }
       visF1 = warpPoints[1].dstBin;
       visF2 = warpPoints[2].dstBin;
       visualizationLock.exit();
@@ -264,9 +433,8 @@ namespace dsp
     // --- Synthesis (IFFT + window) ---
     fft->performRealOnlyInverseTransform(fftBuffer.data());
 
-    // Normalize: JUCE IFFT does not divide by N.
-    // Combined with overlap-add of Hann^2 (= 1.5), total normalization = 1/(N * 1.5)
-    const float normFactor = 1.0f / ((float)fftSize * overlapAddSum);
+    // JUCE's IFFT is normalised. Compensate only for Hann^2 overlap-add.
+    const float normFactor = 1.0f / overlapAddSum;
     for (int i = 0; i < fftSize; ++i)
       fftBuffer[(size_t)i] *= normFactor;
 
@@ -287,15 +455,10 @@ namespace dsp
     if (inputChannels == 0 || outputChannels == 0)
       return;
 
-    if (channelStates.size() < outputChannels)
-    {
-      const auto oldSize = channelStates.size();
-      channelStates.resize(outputChannels);
-      for (size_t ch = oldSize; ch < channelStates.size(); ++ch)
-        initialiseChannelState(channelStates[ch]);
-    }
+    jassert(channelStates.size() >= outputChannels);
+    const size_t channelsToProcess = std::min(outputChannels, channelStates.size());
 
-    for (size_t ch = 0; ch < outputChannels; ++ch)
+    for (size_t ch = 0; ch < channelsToProcess; ++ch)
     {
       auto &state = channelStates[ch];
       const auto sourceChannel = std::min(ch, inputChannels - 1);
@@ -333,6 +496,9 @@ namespace dsp
         }
       }
     }
+
+    for (size_t ch = channelsToProcess; ch < outputChannels; ++ch)
+      juce::FloatVectorOperations::clear(outputBlock.getChannelPointer(ch), (int)numSamples);
   }
 
   void SpectralProcessor::getLatestVisualizationData(std::vector<float> &spectrum,

@@ -4,9 +4,47 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <algorithm>
 #include <array>
+#include <functional>
+#include <memory>
 #include <vector>
 
 #include "PluginProcessor.h"
+
+class SpectralMorpherLookAndFeel : public juce::LookAndFeel_V4
+{
+public:
+  SpectralMorpherLookAndFeel();
+
+  void drawButtonBackground(juce::Graphics &,
+                            juce::Button &,
+                            const juce::Colour &backgroundColour,
+                            bool isMouseOverButton,
+                            bool isButtonDown) override;
+  void drawButtonText(juce::Graphics &,
+                      juce::TextButton &,
+                      bool isMouseOverButton,
+                      bool isButtonDown) override;
+  void drawRotarySlider(juce::Graphics &,
+                        int x,
+                        int y,
+                        int width,
+                        int height,
+                        float sliderPosProportional,
+                        float rotaryStartAngle,
+                        float rotaryEndAngle,
+                        juce::Slider &) override;
+  void drawLinearSlider(juce::Graphics &,
+                        int x,
+                        int y,
+                        int width,
+                        int height,
+                        float sliderPos,
+                        float minSliderPos,
+                        float maxSliderPos,
+                        juce::Slider::SliderStyle,
+                        juce::Slider &) override;
+  juce::Font getTextButtonFont(juce::TextButton &, int buttonHeight) override;
+};
 
 class SpectrumVisualizer : public juce::Component, public juce::Timer
 {
@@ -14,7 +52,9 @@ public:
   explicit SpectrumVisualizer(SpectralFormantMorpherAudioProcessor &p)
       : processor(p)
   {
-    startTimerHz(60);
+    setTitle("Live spectrum analyzer");
+    setDescription("Input spectrum and the warped spectral envelope");
+    startTimerHz(30);
   }
 
   ~SpectrumVisualizer() override
@@ -22,44 +62,13 @@ public:
     stopTimer();
   }
 
-  void paint(juce::Graphics &g) override
-  {
-    g.fillAll(juce::Colour(0xff101214));
-
-    auto bounds = getLocalBounds().toFloat();
-    g.setColour(juce::Colour(0xff2a2f33));
-    g.drawRoundedRectangle(bounds.reduced(0.5f), 6.0f, 1.0f);
-
-    if (lastSpectrum.empty() || lastEnvelope.empty())
-      return;
-
-    const float width = bounds.getWidth();
-    const float height = bounds.getHeight();
-
-    g.setColour(juce::Colour(0xff22272b));
-    for (int i = 1; i < 4; ++i)
-    {
-      const float y = height * (float)i / 4.0f;
-      g.drawHorizontalLine((int)y, 0.0f, width);
-    }
-
-    g.setColour(juce::Colour(0xff384149));
-    drawPath(g, lastSpectrum, width, height, true);
-
-    g.setColour(juce::Colour(0xff61d6d6));
-    drawPath(g, lastEnvelope, width, height, false);
-
-    const float binWidth = width / (float)lastEnvelope.size();
-
-    if (lastF1 > 0.0f)
-      drawNode(g, lastF1 * binWidth, "F1", height);
-
-    if (lastF2 > 0.0f)
-      drawNode(g, lastF2 * binWidth, "F2", height);
-  }
+  void paint(juce::Graphics &g) override;
 
   void timerCallback() override
   {
+    if (!isShowing())
+      return;
+
     processor.getSpectralProcessor().getLatestVisualizationData(lastSpectrum, lastEnvelope, lastF1, lastF2);
     repaint();
   }
@@ -73,86 +82,62 @@ private:
 
   static float magToY(float mag, float height)
   {
-    const float db = juce::jlimit(-100.0f, 0.0f, juce::Decibels::gainToDecibels(std::max(mag, 1.0e-9f)));
-    return juce::jmap(db, -100.0f, 0.0f, height, 0.0f);
+    const float db = juce::jlimit(-72.0f, 0.0f, juce::Decibels::gainToDecibels(std::max(mag, 1.0e-9f)));
+    return juce::jmap(db, -72.0f, 0.0f, height, 0.0f);
   }
 
-  static void drawPath(juce::Graphics &g, const std::vector<float> &data, float width, float height, bool fill)
-  {
-    if (data.empty())
-      return;
-
-    juce::Path path;
-
-    const int numBins = (int)data.size();
-    const float firstY = magToY(data.front(), height);
-    path.startNewSubPath(0.0f, fill ? height : firstY);
-    if (fill)
-      path.lineTo(0.0f, firstY);
-
-    for (int i = 0; i < numBins; ++i)
-    {
-      const float x = (numBins > 1) ? (float)i / (float)(numBins - 1) * width : 0.0f;
-      const float y = magToY(data[(size_t)i], height);
-      path.lineTo(x, y);
-    }
-
-    if (fill)
-    {
-      path.lineTo(width, height);
-      path.closeSubPath();
-      g.fillPath(path);
-    }
-    else
-    {
-      g.strokePath(path, juce::PathStrokeType(2.0f));
-    }
-  }
-
-  static void drawNode(juce::Graphics &g, float x, const juce::String &label, float height)
-  {
-    const float y = height * 0.15f;
-    const float radius = 7.0f;
-    const juce::Rectangle<float> area(x - radius, y - radius, radius * 2.0f, radius * 2.0f);
-
-    g.setColour(juce::Colour(0xfff4c95d));
-    g.fillEllipse(area);
-    g.setColour(juce::Colour(0xff101214));
-    g.drawEllipse(area, 2.0f);
-
-    g.setColour(juce::Colours::white.withAlpha(0.9f));
-    g.drawText(label, (int)x + 8, (int)y - 10, 28, 20, juce::Justification::left);
-  }
+  static float frequencyToX(float frequency, float minFrequency, float maxFrequency, float width);
+  static void drawPath(juce::Graphics &g,
+                       const std::vector<float> &data,
+                       double sampleRate,
+                       float minFrequency,
+                       float maxFrequency,
+                       juce::Rectangle<float> graph,
+                       bool fill);
+  static void drawNode(juce::Graphics &g, float x, const juce::String &label, juce::Rectangle<float> graph);
 };
 
 class XYFormantPad : public juce::Component, private juce::Timer
 {
 public:
-  explicit XYFormantPad(SpectralFormantMorpherAudioProcessor &p)
-      : processor(p)
-  {
-    setMouseCursor(juce::MouseCursor::CrosshairCursor);
-    startTimerHz(30);
-  }
-
-  ~XYFormantPad() override
-  {
-    stopTimer();
-  }
+  explicit XYFormantPad(SpectralFormantMorpherAudioProcessor &p);
+  ~XYFormantPad() override;
 
   void paint(juce::Graphics &g) override;
   void mouseDown(const juce::MouseEvent &event) override;
   void mouseDrag(const juce::MouseEvent &event) override;
   void mouseUp(const juce::MouseEvent &event) override;
+  bool keyPressed(const juce::KeyPress &key) override;
+  void focusGained(juce::Component::FocusChangeType) override { repaint(); }
+  void focusLost(juce::Component::FocusChangeType) override { repaint(); }
+  std::unique_ptr<juce::AccessibilityHandler> createAccessibilityHandler() override;
 
 private:
   SpectralFormantMorpherAudioProcessor &processor;
   bool dragging = false;
+  float lastF1 = -1.0f;
+  float lastF2 = -1.0f;
 
   void timerCallback() override;
   void beginGesture();
   void endGesture();
   void updateFromPosition(juce::Point<float> pos);
+  void nudgeParameter(const juce::String &parameterID, float delta);
+};
+
+class FormantTargetSlider : public juce::Slider
+{
+public:
+  std::function<void()> onKeyboardEdit;
+
+  bool keyPressed(const juce::KeyPress &key) override
+  {
+    const bool handled = juce::Slider::keyPressed(key);
+    if (handled && onKeyboardEdit)
+      onKeyboardEdit();
+
+    return handled;
+  }
 };
 
 class SpectralFormantMorpherAudioProcessorEditor : public juce::AudioProcessorEditor,
@@ -167,22 +152,26 @@ public:
 
 private:
   SpectralFormantMorpherAudioProcessor &audioProcessor;
+  SpectralMorpherLookAndFeel lookAndFeel;
 
   SpectrumVisualizer visualizer;
   XYFormantPad xyPad;
 
-  std::array<juce::Slider, dsp::SpectralProcessor::numFormants - 2> formantSliders;
+  std::array<FormantTargetSlider, dsp::SpectralProcessor::numFormants - 2> formantSliders;
   std::array<juce::Label, dsp::SpectralProcessor::numFormants - 2> formantLabels;
   std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> formantAttachments;
 
-  juce::TextButton loadSourceButton{"参照音源を解析"};
+  juce::TextButton loadSourceButton{"Analyze reference"};
   juce::TextButton copyProfileButton{"Copy"};
   juce::TextButton pasteProfileButton{"Paste"};
   juce::TextButton exportProfileButton{"Export"};
   juce::TextButton importProfileButton{"Import"};
+  juce::Label referenceStatusLabel;
   juce::Label statusLabel;
   std::unique_ptr<juce::FileChooser> sourceFileChooser;
   std::unique_ptr<juce::FileChooser> profileFileChooser;
+  struct ReferenceAnalysisState;
+  std::shared_ptr<ReferenceAnalysisState> referenceAnalysisState;
 
   // Mix & Output Gain controls
   juce::Slider mixSlider;
@@ -192,9 +181,10 @@ private:
   juce::Slider gainSlider;
   juce::Label gainLabel;
   std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> gainAttachment;
+  juce::TooltipWindow tooltipWindow{this, 600};
 
   void buttonClicked(juce::Button *button) override;
-  void configureUtilityButton(juce::TextButton &button);
+  void configureUtilityButton(juce::TextButton &button, const juce::String &tooltip);
   void setStatusMessage(const juce::String &message, bool ok);
   void copyVoiceProfileToClipboard();
   void pasteVoiceProfileFromClipboard();

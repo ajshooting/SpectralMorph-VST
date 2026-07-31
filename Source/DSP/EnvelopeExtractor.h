@@ -85,14 +85,12 @@ namespace dsp
             // 4. FFT back to Frequency Domain
             forwardFFT->performRealOnlyForwardTransform(frequencyDomainBuffer.data());
 
-            // 5. Exponentiate to get Linear Magnitude Envelope
-            //    CRITICAL FIX: JUCE FFT round-trip (IFFT→FFT) multiplies by N.
-            //    We must divide the log-domain result by N before exponentiating,
-            //    otherwise we get envelope^N instead of envelope.
-            const float invN = 1.0f / (float)n;
+            // 5. Exponentiate to get Linear Magnitude Envelope.
+            // JUCE's inverse transform is already normalised, so the
+            // inverse/forward round trip needs no additional 1/N factor.
             for (int i = 0; i < halfN; ++i)
             {
-                float logEnv = frequencyDomainBuffer[(size_t)i * 2] * invN;
+                float logEnv = frequencyDomainBuffer[(size_t)i * 2];
                 // Clamp log envelope to prevent extreme values
                 logEnv = std::max(-20.0f, std::min(logEnv, 20.0f));
                 envelope[(size_t)i] = std::exp(logEnv);

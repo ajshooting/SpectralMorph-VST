@@ -1,4 +1,5 @@
 build/
+/ManualTest
 JuceLibraryCode/
 *.jucer
 *.user
