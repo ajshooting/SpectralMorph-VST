@@ -45,6 +45,7 @@ namespace dsp
         /**
          * Retrieves the latest spectral data for the GUI.
          * Thread-safe using a lock (tryEnter pattern).
+         * F1/F2 are warped peak positions in bins, or zero when not detected.
          */
         void getLatestVisualizationData(std::vector<float> &spectrum, std::vector<float> &envelope, float &f1, float &f2);
 

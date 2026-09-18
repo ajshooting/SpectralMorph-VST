@@ -19,7 +19,7 @@ This is a spectral-envelope processor, not a neural voice-conversion or pitch-sh
 1. A 1024-sample Hann-windowed STFT runs at 75% overlap.
 2. Cepstral liftering extracts a smooth spectral envelope.
 3. Up to 15 envelope peaks are detected as the current formants.
-4. A monotonic piecewise-linear map moves those peaks toward F1-F15.
+4. A monotonic piecewise-linear map moves only the detected peaks toward the corresponding F1-F15 targets. Undetected targets do not affect the map; frames with no detected peaks retain their original spectrum.
 5. The warped envelope is applied to the original spectral fine structure.
 6. Inverse STFT and overlap-add reconstruct the signal.
 
@@ -91,6 +91,8 @@ The regression runner covers:
 - cepstral-envelope gain preservation
 - JUCE FFT round-trip normalization
 - STFT impulse gain and exact latency
+- zero-, one-, and two-peak warping, including inactive targets and analyzer markers
+- very quiet peakless-signal gain preservation
 - stereo channel isolation
 - silent-reference rejection
 - isolated-transient reference rejection

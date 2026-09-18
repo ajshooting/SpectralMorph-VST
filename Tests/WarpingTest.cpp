@@ -142,7 +142,7 @@ bool testJuceFftRoundTrip()
     return pass;
 }
 
-bool testSpectralImpulseGainAndLatency()
+bool testSpectralImpulseGainAndLatency(float impulseAmplitude = 1.0f)
 {
     constexpr double sampleRate = 48000.0;
     constexpr int blockSize = 128;
@@ -162,7 +162,7 @@ bool testSpectralImpulseGainAndLatency()
         buffer.clear();
 
         if (inputImpulseIndex >= blockStart && inputImpulseIndex < blockStart + blockSize)
-            buffer.setSample(0, inputImpulseIndex - blockStart, 1.0f);
+            buffer.setSample(0, inputImpulseIndex - blockStart, impulseAmplitude);
 
         juce::dsp::AudioBlock<float> block(buffer);
         juce::dsp::ProcessContextReplacing<float> context(block);
@@ -179,7 +179,7 @@ bool testSpectralImpulseGainAndLatency()
     const auto peak = std::max_element(leftOutput.begin(), leftOutput.end(), [](float a, float b)
                                        { return std::abs(a) < std::abs(b); });
     const int peakIndex = (int)std::distance(leftOutput.begin(), peak);
-    const float peakMagnitude = std::abs(*peak);
+    const float peakMagnitude = std::abs(*peak) / impulseAmplitude;
     const bool allFinite = std::all_of(leftOutput.begin(), leftOutput.end(), [](float sample)
                                        { return std::isfinite(sample); })
                         && std::all_of(rightOutput.begin(), rightOutput.end(), [](float sample)
@@ -197,7 +197,8 @@ bool testSpectralImpulseGainAndLatency()
 
     if (pass)
     {
-        std::cout << "Test 6 (Spectral Impulse Gain/Latency) Passed\n";
+        std::cout << "Test 6 (Spectral Impulse Gain/Latency, input="
+                  << impulseAmplitude << ") Passed\n";
         return true;
     }
 
@@ -207,6 +208,115 @@ bool testSpectralImpulseGainAndLatency()
               << ", right peak=" << rightPeak
               << ", finite=" << allFinite << "\n";
     return false;
+}
+
+bool testOnlyDetectedFormantsAreWarped(size_t expectedCount, int impulseSpacing)
+{
+    constexpr int fftSize = 1024;
+    constexpr double sampleRate = 48000.0;
+    constexpr float hzPerBin = (float)sampleRate / (float)fftSize;
+
+    // A single impulse has a flat envelope. Adding a second impulse L samples
+    // away gives envelope maxima at multiples of sampleRate / L. L=8 and L=12
+    // therefore give exactly one and two peaks in the 150-9000 Hz search band.
+    // Compensate the analysis window so the final frame has that exact spectrum.
+    std::vector<float> hann((size_t)fftSize, 1.0f);
+    juce::dsp::WindowingFunction<float> window(
+        fftSize, juce::dsp::WindowingFunction<float>::hann, false);
+    window.multiplyWithWindowingTable(hann.data(), fftSize);
+
+    juce::AudioBuffer<float> source(1, fftSize);
+    source.clear();
+    source.setSample(0, fftSize / 2, 1.0f / hann[(size_t)fftSize / 2]);
+    if (impulseSpacing > 0)
+    {
+        const int secondIndex = fftSize / 2 - impulseSpacing;
+        source.setSample(0, secondIndex, 0.25f / hann[(size_t)secondIndex]);
+    }
+
+    std::array<float, dsp::SpectralProcessor::numFormants> targets{};
+    for (size_t i = 0; i < targets.size(); ++i)
+        targets[i] = 750.0f * (float)(i + 1);
+
+    struct Snapshot
+    {
+        std::vector<float> spectrum;
+        std::vector<float> envelope;
+        float f1 = 0.0f;
+        float f2 = 0.0f;
+    };
+
+    const auto process = [&source, &targets]
+    {
+        dsp::SpectralProcessor processor;
+        processor.prepare({sampleRate, (juce::uint32)fftSize, 1});
+        processor.setTargetFormantsHz(targets);
+        juce::AudioBuffer<float> buffer;
+        buffer.makeCopyOf(source);
+        juce::dsp::AudioBlock<float> block(buffer);
+        juce::dsp::ProcessContextReplacing<float> context(block);
+        processor.process(context);
+
+        Snapshot result;
+        processor.getLatestVisualizationData(
+            result.spectrum, result.envelope, result.f1, result.f2);
+        return result;
+    };
+
+    const auto baseline = process();
+    for (size_t i = expectedCount; i < targets.size(); ++i)
+        targets[i] = 10000.0f + 100.0f * (float)i;
+    const auto changedUnusedTargets = process();
+
+    if (baseline.envelope.size() != (size_t)fftSize / 2 + 1
+        || baseline.envelope.size() != baseline.spectrum.size()
+        || baseline.envelope.size() != changedUnusedTargets.envelope.size())
+    {
+        std::cout << "Detected-peak warping: unexpected visualization size\n";
+        return false;
+    }
+
+    bool pass = std::abs(baseline.f1 - (expectedCount > 0 ? 750.0f / hzPerBin : 0.0f)) < 1.0e-5f
+             && std::abs(baseline.f2 - (expectedCount > 1 ? 1500.0f / hzPerBin : 0.0f)) < 1.0e-5f
+             && std::abs(baseline.f1 - changedUnusedTargets.f1) < 1.0e-5f
+             && std::abs(baseline.f2 - changedUnusedTargets.f2) < 1.0e-5f;
+
+    float unusedTargetError = 0.0f;
+    for (size_t i = 0; i < baseline.envelope.size(); ++i)
+    {
+        pass = pass && std::isfinite(baseline.envelope[i])
+                    && std::isfinite(changedUnusedTargets.envelope[i]);
+        unusedTargetError = std::max(unusedTargetError,
+            std::abs(baseline.envelope[i] - changedUnusedTargets.envelope[i]));
+        if (expectedCount == 0)
+            pass = pass && std::abs(baseline.envelope[i] - baseline.spectrum[i]) < 1.0e-7f;
+    }
+    pass = pass && unusedTargetError < 1.0e-7f;
+
+    // A detected target must still move a real envelope peak, not merely leave
+    // every frame untouched to satisfy the unused-target comparison above.
+    if (expectedCount > 0)
+    {
+        targets[0] = 1125.0f;
+        const auto movedFirstTarget = process();
+        const size_t originalTargetBin = (size_t)(750.0f / hzPerBin);
+        const size_t movedTargetBin = (size_t)(1125.0f / hzPerBin);
+        pass = pass
+            && movedFirstTarget.envelope.size() == baseline.envelope.size()
+            && std::abs(movedFirstTarget.f1 - (float)movedTargetBin) < 1.0e-5f
+            && std::abs(movedFirstTarget.envelope[movedTargetBin]
+                        - baseline.envelope[originalTargetBin]) < 1.0e-7f
+            && movedFirstTarget.envelope[movedTargetBin]
+                 > movedFirstTarget.envelope[movedTargetBin - 1]
+            && movedFirstTarget.envelope[movedTargetBin]
+                 > movedFirstTarget.envelope[movedTargetBin + 1];
+    }
+
+    std::cout << "Detected-peak warping (" << expectedCount << " peaks): "
+              << (pass ? "Passed" : "FAILED")
+              << ", unused-target error=" << unusedTargetError
+              << ", markers=" << baseline.f1 << ", " << baseline.f2 << "\n";
+    return pass;
 }
 
 bool testSilentReferenceIsRejected()
@@ -453,6 +563,14 @@ int main()
         return 1;
 
     if (!testReferenceAnalysisCanBeCancelled())
+        return 1;
+
+    bool detectedPeakTestsPassed = true;
+    detectedPeakTestsPassed &= testOnlyDetectedFormantsAreWarped(0, 0);
+    detectedPeakTestsPassed &= testOnlyDetectedFormantsAreWarped(1, 8);
+    detectedPeakTestsPassed &= testOnlyDetectedFormantsAreWarped(2, 12);
+    detectedPeakTestsPassed &= testSpectralImpulseGainAndLatency(1.0e-8f);
+    if (!detectedPeakTestsPassed)
         return 1;
 
     return 0;

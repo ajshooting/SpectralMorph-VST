@@ -377,19 +377,22 @@ namespace dsp
     envelopeExtractor.process(magnitudeSpectrum, extractedEnvelope);
 
     // --- Formant Detection & Warping ---
-    detectFormants(extractedEnvelope, currentSampleRate, currentFormantBins);
+    const auto detectedFormantCount = detectFormants(
+        extractedEnvelope, currentSampleRate, currentFormantBins);
 
     warpPoints.clear();
     warpPoints.push_back({0.0f, 0.0f});
 
     const float hzPerBin = (float)currentSampleRate / (float)fftSize;
     float lastDst = 0.0f;
-    for (size_t i = 0; i < numFormants; ++i)
+    // Entries beyond the detected count are synthetic fallback positions.
+    // Only actual peaks may anchor the warp; zero peaks leaves an identity map.
+    for (size_t i = 0; i < detectedFormantCount; ++i)
     {
       const float src = currentFormantBins[i];
       const float targetBin = targetFormantsHz[i] / std::max(1.0f, hzPerBin);
       const float minimumDst = lastDst + 1.0f;
-      const float remainingPoints = (float)(numFormants - i - 1);
+      const float remainingPoints = (float)(detectedFormantCount - i - 1);
       const float maximumDst = (float)(numBins - 2) - remainingPoints;
       const float dst = juce::jlimit(minimumDst, maximumDst, targetBin);
       warpPoints.push_back({src, dst});
@@ -412,22 +415,27 @@ namespace dsp
         visSpectrum[(size_t)i] = magnitudeSpectrum[(size_t)i] * displayNormalisation;
         visEnvelope[(size_t)i] = warpedEnvelope[(size_t)i] * displayNormalisation;
       }
-      visF1 = warpPoints[1].dstBin;
-      visF2 = warpPoints[2].dstBin;
+      visF1 = detectedFormantCount > 0 ? warpPoints[1].dstBin : 0.0f;
+      visF2 = detectedFormantCount > 1 ? warpPoints[2].dstBin : 0.0f;
       visualizationLock.exit();
     }
 
     // --- Apply warped envelope (Source-Filter resynthesis) ---
     // Scale = warpedEnv / originalEnv, clamped to prevent extreme amplification.
-    const float maxGainLinear = std::pow(10.0f, maxEnvelopeGainDb / 20.0f);
-    for (int i = 0; i < numBins; ++i)
+    // Preserve peakless frames exactly, including signals below the gain
+    // calculation's envelope floor. They still use normal STFT reconstruction.
+    if (detectedFormantCount > 0)
     {
-      const float originalEnv = std::max(extractedEnvelope[(size_t)i], 1e-7f);
-      const float warpedVal = std::max(warpedEnvelope[(size_t)i], 1e-9f);
-      const float scale = juce::jlimit(0.0f, maxGainLinear, warpedVal / originalEnv);
+      const float maxGainLinear = std::pow(10.0f, maxEnvelopeGainDb / 20.0f);
+      for (int i = 0; i < numBins; ++i)
+      {
+        const float originalEnv = std::max(extractedEnvelope[(size_t)i], 1e-7f);
+        const float warpedVal = std::max(warpedEnvelope[(size_t)i], 1e-9f);
+        const float scale = juce::jlimit(0.0f, maxGainLinear, warpedVal / originalEnv);
 
-      fftBuffer[(size_t)i * 2] *= scale;
-      fftBuffer[(size_t)i * 2 + 1] *= scale;
+        fftBuffer[(size_t)i * 2] *= scale;
+        fftBuffer[(size_t)i * 2 + 1] *= scale;
+      }
     }
 
     // --- Synthesis (IFFT + window) ---
